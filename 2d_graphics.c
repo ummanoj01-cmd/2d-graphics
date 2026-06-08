@@ -3,8 +3,8 @@
 #include <string.h>
 #include <math.h>
 
-#define CANVAS_WIDTH 100
-#define CANVAS_HEIGHT 40
+#define CANVAS_WIDTH 40
+#define CANVAS_HEIGHT 20
 #define MAX_OBJECTS 100
 
 // Shape types
@@ -18,7 +18,7 @@ typedef enum {
 // Shape structure
 typedef struct {
     ShapeType type;
-    int x1, y1, x2, y2;
+    int x1, y1, x2, y2, x3, y3;
     int radius;
     char symbol;
 } Shape;
@@ -28,11 +28,11 @@ char canvas[CANVAS_HEIGHT][CANVAS_WIDTH];
 Shape objects[MAX_OBJECTS];
 int object_count = 0;
 
-// Initialize canvas with spaces
+// Initialize canvas with underscores
 void init_canvas() {
     for (int y = 0; y < CANVAS_HEIGHT; y++) {
         for (int x = 0; x < CANVAS_WIDTH; x++) {
-            canvas[y][x] = ' ';
+            canvas[y][x] = '_';
         }
     }
 }
@@ -125,7 +125,7 @@ void draw_triangle(int x1, int y1, int x2, int y2, int x3, int y3, char symbol) 
 }
 
 // Add a shape to the objects list
-int add_object(ShapeType type, int x1, int y1, int x2, int y2, int radius, char symbol) {
+int add_object(ShapeType type, int x1, int y1, int x2, int y2, int x3, int y3, int radius, char symbol) {
     if (object_count >= MAX_OBJECTS) {
         printf("Error: Maximum number of objects reached!\n");
         return -1;
@@ -136,6 +136,8 @@ int add_object(ShapeType type, int x1, int y1, int x2, int y2, int radius, char 
     objects[object_count].y1 = y1;
     objects[object_count].x2 = x2;
     objects[object_count].y2 = y2;
+    objects[object_count].x3 = x3;
+    objects[object_count].y3 = y3;
     objects[object_count].radius = radius;
     objects[object_count].symbol = symbol;
 
@@ -157,8 +159,43 @@ void delete_object(int index) {
     printf("Object deleted successfully! Remaining objects: %d\n", object_count);
 }
 
-// Render all objects onto the canvas
-void render_canvas() {
+// Modify an existing object
+void modify_object(int index) {
+    if (index < 0 || index >= object_count) {
+        printf("Error: Invalid object index!\n");
+        return;
+    }
+
+    Shape *shape = &objects[index];
+    printf("Modifying object %d:\n", index);
+    printf("Current symbol: %c\n", shape->symbol);
+    printf("Enter new symbol (or same symbol to keep): ");
+    scanf(" %c", &shape->symbol);
+
+    switch (shape->type) {
+        case CIRCLE:
+            printf("Enter new center X Y and radius: ");
+            scanf("%d %d %d", &shape->x1, &shape->y1, &shape->radius);
+            break;
+        case RECTANGLE:
+            printf("Enter new top-left X Y and bottom-right X Y: ");
+            scanf("%d %d %d %d", &shape->x1, &shape->y1, &shape->x2, &shape->y2);
+            break;
+        case LINE:
+            printf("Enter new start X Y and end X Y: ");
+            scanf("%d %d %d %d", &shape->x1, &shape->y1, &shape->x2, &shape->y2);
+            break;
+        case TRIANGLE:
+            printf("Enter new three points x1 y1 x2 y2 x3 y3: ");
+            scanf("%d %d %d %d %d %d", &shape->x1, &shape->y1, &shape->x2, &shape->y2, &shape->x3, &shape->y3);
+            break;
+    }
+
+    printf("Object %d modified successfully!\n", index);
+}
+
+// Rebuild the canvas with '_' and draw all objects
+void rebuild_canvas() {
     init_canvas();
 
     for (int i = 0; i < object_count; i++) {
@@ -174,7 +211,7 @@ void render_canvas() {
                 draw_line(shape->x1, shape->y1, shape->x2, shape->y2, shape->symbol);
                 break;
             case TRIANGLE:
-                draw_triangle(shape->x1, shape->y1, shape->x2, shape->y2, shape->radius, shape->y2, shape->symbol);
+                draw_triangle(shape->x1, shape->y1, shape->x2, shape->y2, shape->x3, shape->y3, shape->symbol);
                 break;
         }
     }
@@ -183,21 +220,52 @@ void render_canvas() {
 // Display the canvas
 void display_canvas() {
     printf("\n");
-    printf("+");
-    for (int x = 0; x < CANVAS_WIDTH; x++) printf("-");
-    printf("+\n");
-
     for (int y = 0; y < CANVAS_HEIGHT; y++) {
-        printf("|");
         for (int x = 0; x < CANVAS_WIDTH; x++) {
             printf("%c", canvas[y][x]);
         }
-        printf("|\n");
+        printf("\n");
     }
+    printf("\n");
+}
 
-    printf("+");
-    for (int x = 0; x < CANVAS_WIDTH; x++) printf("-");
-    printf("+\n\n");
+// Allow the user to pick a point from a canvas row and optionally set it
+void pick_point() {
+    int y, x;
+    printf("\n=== Pick/Set Point ===\n");
+    printf("Enter row (0..%d): ", CANVAS_HEIGHT - 1);
+    if (scanf("%d", &y) != 1) { scanf("%*s"); printf("Invalid input.\n"); return; }
+    if (y < 0 || y >= CANVAS_HEIGHT) { printf("Row out of range.\n"); return; }
+
+    // Show an index ruler and the selected row
+    printf("Index: ");
+    for (int i = 0; i < CANVAS_WIDTH; i++) {
+        printf("%d", i % 10);
+    }
+    printf("\n");
+
+    printf("Row %d:  ", y);
+    for (int i = 0; i < CANVAS_WIDTH; i++) putchar(canvas[y][i]);
+    printf("\n");
+
+    printf("Enter column (0..%d): ", CANVAS_WIDTH - 1);
+    if (scanf("%d", &x) != 1) { scanf("%*s"); printf("Invalid input.\n"); return; }
+    if (x < 0 || x >= CANVAS_WIDTH) { printf("Column out of range.\n"); return; }
+
+    printf("Character at (%d,%d) = '%c'\n", x, y, canvas[y][x]);
+    printf("Do you want to change it? (y/n): ");
+    char ans = 'n';
+    scanf(" %c", &ans);
+    if (ans == 'y' || ans == 'Y') {
+        char symbol;
+        printf("Enter new symbol: ");
+        scanf(" %c", &symbol);
+        // Add a tiny object representing a single point so it persists when canvas rebuilt
+        add_object(LINE, x, y, x, y, 0, 0, 0, symbol);
+        printf("Point set at (%d,%d) with symbol '%c'.\n", x, y, symbol);
+    } else {
+        printf("No change made.\n");
+    }
 }
 
 // List all objects
@@ -225,7 +293,7 @@ void list_objects() {
                 break;
             case TRIANGLE:
                 printf("Triangle (%d, %d) (%d, %d) (%d, %d) symbol='%c'\n", 
-                    objects[i].x1, objects[i].y1, objects[i].x2, objects[i].y2, objects[i].radius, objects[i].y2, objects[i].symbol);
+                    objects[i].x1, objects[i].y1, objects[i].x2, objects[i].y2, objects[i].x3, objects[i].y3, objects[i].symbol);
                 break;
         }
     }
@@ -248,7 +316,7 @@ void menu_add_object() {
     printf("Enter symbol (e.g., *, _, #): ");
     scanf(" %c", &symbol);
 
-    int x1, y1, x2, y2, radius;
+    int x1, y1, x2, y2, x3, y3, radius;
 
     switch (choice) {
         case 1:
@@ -256,22 +324,22 @@ void menu_add_object() {
             scanf("%d %d", &x1, &y1);
             printf("Enter radius: ");
             scanf("%d", &radius);
-            add_object(CIRCLE, x1, y1, 0, 0, radius, symbol);
+            add_object(CIRCLE, x1, y1, 0, 0, 0, 0, radius, symbol);
             break;
         case 2:
             printf("Enter top-left X, Y and bottom-right X, Y: ");
             scanf("%d %d %d %d", &x1, &y1, &x2, &y2);
-            add_object(RECTANGLE, x1, y1, x2, y2, 0, symbol);
+            add_object(RECTANGLE, x1, y1, x2, y2, 0, 0, 0, symbol);
             break;
         case 3:
             printf("Enter start X, Y and end X, Y: ");
             scanf("%d %d %d %d", &x1, &y1, &x2, &y2);
-            add_object(LINE, x1, y1, x2, y2, 0, symbol);
+            add_object(LINE, x1, y1, x2, y2, 0, 0, 0, symbol);
             break;
         case 4:
             printf("Enter three points (x1 y1 x2 y2 x3 y3): ");
-            scanf("%d %d %d %d %d %d", &x1, &y1, &x2, &y2, &radius, &y2);
-            add_object(TRIANGLE, x1, y1, x2, y2, radius, symbol);
+            scanf("%d %d %d %d %d %d", &x1, &y1, &x2, &y2, &x3, &y3);
+            add_object(TRIANGLE, x1, y1, x2, y2, x3, y3, 0, symbol);
             break;
         default:
             printf("Invalid choice!\n");
@@ -289,15 +357,17 @@ void main_menu() {
         printf("3. View Picture\n");
         printf("4. List Objects\n");
         printf("5. Clear All\n");
-        printf("6. Exit\n");
-        printf("Select (1-6): ");
+        printf("6. Pick/Set Point\n");
+        printf("7. Modify Object\n");
+        printf("8. Exit\n");
+        printf("Select (1-8): ");
         
         scanf("%d", &choice);
 
         switch (choice) {
             case 1:
                 menu_add_object();
-                render_canvas();
+                rebuild_canvas();
                 display_canvas();
                 break;
             case 2: {
@@ -307,13 +377,13 @@ void main_menu() {
                     int index;
                     scanf("%d", &index);
                     delete_object(index);
-                    render_canvas();
+                    rebuild_canvas();
                     display_canvas();
                 }
                 break;
             }
             case 3:
-                render_canvas();
+                rebuild_canvas();
                 display_canvas();
                 break;
             case 4:
@@ -325,6 +395,23 @@ void main_menu() {
                 printf("All objects cleared!\n");
                 break;
             case 6:
+                pick_point();
+                rebuild_canvas();
+                display_canvas();
+                break;
+            case 7: {
+                list_objects();
+                if (object_count > 0) {
+                    printf("Enter object index to modify: ");
+                    int index;
+                    scanf("%d", &index);
+                    modify_object(index);
+                    rebuild_canvas();
+                    display_canvas();
+                }
+                break;
+            }
+            case 8:
                 printf("Thank you for using 2D Graphics Editor!\n");
                 return;
             default:
@@ -338,3 +425,4 @@ int main() {
     main_menu();
     return 0;
 }
+
