@@ -37,6 +37,34 @@ void init_canvas() {
     }
 }
 
+// Input helpers
+int read_line(char *buf, int size) {
+    if (!fgets(buf, size, stdin)) return 0;
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+    return 1;
+}
+
+int read_int(const char *prompt, int *out) {
+    char buf[128];
+    if (prompt) printf("%s", prompt);
+    if (!read_line(buf, sizeof(buf))) return 0;
+    char *endptr;
+    long v = strtol(buf, &endptr, 10);
+    if (endptr == buf) return 0;
+    *out = (int)v;
+    return 1;
+}
+
+int read_char(const char *prompt, char *out) {
+    char buf[16];
+    if (prompt) printf("%s", prompt);
+    if (!read_line(buf, sizeof(buf))) return 0;
+    if (buf[0] == '\0') return 0;
+    *out = buf[0];
+    return 1;
+}
+
 // Draw a point on canvas
 void draw_point(int x, int y, char symbol) {
     if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT) {
@@ -169,25 +197,22 @@ void modify_object(int index) {
     Shape *shape = &objects[index];
     printf("Modifying object %d:\n", index);
     printf("Current symbol: %c\n", shape->symbol);
-    printf("Enter new symbol (or same symbol to keep): ");
-    scanf(" %c", &shape->symbol);
+    char tmp_ch;
+    if (!read_char("Enter new symbol (or same symbol to keep): ", &tmp_ch)) { printf("Invalid input.\n"); return; }
+    shape->symbol = tmp_ch;
 
     switch (shape->type) {
         case CIRCLE:
-            printf("Enter new center X Y and radius: ");
-            scanf("%d %d %d", &shape->x1, &shape->y1, &shape->radius);
+            if (!read_int("Enter new center X: ", &shape->x1) || !read_int("Enter new center Y: ", &shape->y1) || !read_int("Enter new radius: ", &shape->radius)) { printf("Invalid input.\n"); return; }
             break;
         case RECTANGLE:
-            printf("Enter new top-left X Y and bottom-right X Y: ");
-            scanf("%d %d %d %d", &shape->x1, &shape->y1, &shape->x2, &shape->y2);
+            if (!read_int("Enter top-left X: ", &shape->x1) || !read_int("Enter top-left Y: ", &shape->y1) || !read_int("Enter bottom-right X: ", &shape->x2) || !read_int("Enter bottom-right Y: ", &shape->y2)) { printf("Invalid input.\n"); return; }
             break;
         case LINE:
-            printf("Enter new start X Y and end X Y: ");
-            scanf("%d %d %d %d", &shape->x1, &shape->y1, &shape->x2, &shape->y2);
+            if (!read_int("Enter start X: ", &shape->x1) || !read_int("Enter start Y: ", &shape->y1) || !read_int("Enter end X: ", &shape->x2) || !read_int("Enter end Y: ", &shape->y2)) { printf("Invalid input.\n"); return; }
             break;
         case TRIANGLE:
-            printf("Enter new three points x1 y1 x2 y2 x3 y3: ");
-            scanf("%d %d %d %d %d %d", &shape->x1, &shape->y1, &shape->x2, &shape->y2, &shape->x3, &shape->y3);
+            if (!read_int("Enter x1: ", &shape->x1) || !read_int("Enter y1: ", &shape->y1) || !read_int("Enter x2: ", &shape->x2) || !read_int("Enter y2: ", &shape->y2) || !read_int("Enter x3: ", &shape->x3) || !read_int("Enter y3: ", &shape->y3)) { printf("Invalid input.\n"); return; }
             break;
     }
 
@@ -233,8 +258,7 @@ void display_canvas() {
 void pick_point() {
     int y, x;
     printf("\n=== Pick/Set Point ===\n");
-    printf("Enter row (0..%d): ", CANVAS_HEIGHT - 1);
-    if (scanf("%d", &y) != 1) { scanf("%*s"); printf("Invalid input.\n"); return; }
+    if (!read_int("Enter row (0..%d): ", &y)) { printf("Invalid input.\n"); return; }
     if (y < 0 || y >= CANVAS_HEIGHT) { printf("Row out of range.\n"); return; }
 
     // Show an index ruler and the selected row
@@ -248,18 +272,15 @@ void pick_point() {
     for (int i = 0; i < CANVAS_WIDTH; i++) putchar(canvas[y][i]);
     printf("\n");
 
-    printf("Enter column (0..%d): ", CANVAS_WIDTH - 1);
-    if (scanf("%d", &x) != 1) { scanf("%*s"); printf("Invalid input.\n"); return; }
+    if (!read_int("Enter column (0..%d): ", &x)) { printf("Invalid input.\n"); return; }
     if (x < 0 || x >= CANVAS_WIDTH) { printf("Column out of range.\n"); return; }
 
     printf("Character at (%d,%d) = '%c'\n", x, y, canvas[y][x]);
-    printf("Do you want to change it? (y/n): ");
     char ans = 'n';
-    scanf(" %c", &ans);
+    if (!read_char("Do you want to change it? (y/n): ", &ans)) { printf("Invalid input.\n"); return; }
     if (ans == 'y' || ans == 'Y') {
         char symbol;
-        printf("Enter new symbol: ");
-        scanf(" %c", &symbol);
+        if (!read_char("Enter new symbol: ", &symbol)) { printf("Invalid input.\n"); return; }
         // Add a tiny object representing a single point so it persists when canvas rebuilt
         add_object(LINE, x, y, x, y, 0, 0, 0, symbol);
         printf("Point set at (%d,%d) with symbol '%c'.\n", x, y, symbol);
@@ -310,35 +331,29 @@ void menu_add_object() {
     printf("Select (1-4): ");
 
     int choice;
-    scanf("%d", &choice);
+    if (!read_int(NULL, &choice)) { printf("Invalid input.\n"); return; }
 
     char symbol;
-    printf("Enter symbol (e.g., *, _, #): ");
-    scanf(" %c", &symbol);
+    if (!read_char("Enter symbol (e.g., *, _, #): ", &symbol)) { printf("Invalid input.\n"); return; }
 
     int x1, y1, x2, y2, x3, y3, radius;
 
     switch (choice) {
         case 1:
-            printf("Enter center X and Y: ");
-            scanf("%d %d", &x1, &y1);
-            printf("Enter radius: ");
-            scanf("%d", &radius);
+            if (!read_int("Enter center X: ", &x1) || !read_int("Enter center Y: ", &y1)) { printf("Invalid input.\n"); return; }
+            if (!read_int("Enter radius: ", &radius)) { printf("Invalid input.\n"); return; }
             add_object(CIRCLE, x1, y1, 0, 0, 0, 0, radius, symbol);
             break;
         case 2:
-            printf("Enter top-left X, Y and bottom-right X, Y: ");
-            scanf("%d %d %d %d", &x1, &y1, &x2, &y2);
+            if (!read_int("Enter top-left X: ", &x1) || !read_int("Enter top-left Y: ", &y1) || !read_int("Enter bottom-right X: ", &x2) || !read_int("Enter bottom-right Y: ", &y2)) { printf("Invalid input.\n"); return; }
             add_object(RECTANGLE, x1, y1, x2, y2, 0, 0, 0, symbol);
             break;
         case 3:
-            printf("Enter start X, Y and end X, Y: ");
-            scanf("%d %d %d %d", &x1, &y1, &x2, &y2);
+            if (!read_int("Enter start X: ", &x1) || !read_int("Enter start Y: ", &y1) || !read_int("Enter end X: ", &x2) || !read_int("Enter end Y: ", &y2)) { printf("Invalid input.\n"); return; }
             add_object(LINE, x1, y1, x2, y2, 0, 0, 0, symbol);
             break;
         case 4:
-            printf("Enter three points (x1 y1 x2 y2 x3 y3): ");
-            scanf("%d %d %d %d %d %d", &x1, &y1, &x2, &y2, &x3, &y3);
+            if (!read_int("Enter x1: ", &x1) || !read_int("Enter y1: ", &y1) || !read_int("Enter x2: ", &x2) || !read_int("Enter y2: ", &y2) || !read_int("Enter x3: ", &x3) || !read_int("Enter y3: ", &y3)) { printf("Invalid input.\n"); return; }
             add_object(TRIANGLE, x1, y1, x2, y2, x3, y3, 0, symbol);
             break;
         default:
@@ -362,21 +377,19 @@ void main_menu() {
         printf("8. Exit\n");
         printf("Select (1-8): ");
         
-        scanf("%d", &choice);
+        if (!read_int(NULL, &choice)) { printf("Invalid input.\n"); continue; }
 
         switch (choice) {
             case 1:
                 menu_add_object();
-                rebuild_canvas();
                 rebuild_canvas();
                 display_canvas();
                 break;
             case 2: {
                 list_objects();
                 if (object_count > 0) {
-                    printf("Enter object index to delete: ");
                     int index;
-                    scanf("%d", &index);
+                    if (!read_int("Enter object index to delete: ", &index)) { printf("Invalid input.\n"); break; }
                     delete_object(index);
                     rebuild_canvas();
                     display_canvas();
@@ -403,9 +416,8 @@ void main_menu() {
             case 7: {
                 list_objects();
                 if (object_count > 0) {
-                    printf("Enter object index to modify: ");
                     int index;
-                    scanf("%d", &index);
+                    if (!read_int("Enter object index to modify: ", &index)) { printf("Invalid input.\n"); break; }
                     modify_object(index);
                     rebuild_canvas();
                     display_canvas();
