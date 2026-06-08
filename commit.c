@@ -289,32 +289,6 @@ void pick_point() {
     }
 }
 
-int select_canvas_position(const char *label, int *out_x, int *out_y) {
-    int y, x;
-    printf("\n=== Select %s Position ===\n", label);
-    if (!read_int("Enter row (0..19): ", &y)) { printf("Invalid input.\n"); return 0; }
-    if (y < 0 || y >= CANVAS_HEIGHT) { printf("Row out of range.\n"); return 0; }
-
-    printf("Index: ");
-    for (int i = 0; i < CANVAS_WIDTH; i++) {
-        printf("%d", i % 10);
-    }
-    printf("\n");
-
-    printf("Row %d:  ", y);
-    for (int i = 0; i < CANVAS_WIDTH; i++) {
-        putchar(canvas[y][i]);
-    }
-    printf("\n");
-
-    if (!read_int("Enter column (0..39): ", &x)) { printf("Invalid input.\n"); return 0; }
-    if (x < 0 || x >= CANVAS_WIDTH) { printf("Column out of range.\n"); return 0; }
-
-    *out_x = x;
-    *out_y = y;
-    return 1;
-}
-
 // List all objects
 void list_objects() {
     if (object_count == 0) {
@@ -365,50 +339,23 @@ void menu_add_object() {
     int x1, y1, x2, y2, x3, y3, radius;
 
     switch (choice) {
-        case 1: {
-            char ans = 'n';
-            if (read_char("Select center from canvas row? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-                if (!select_canvas_position("circle center", &x1, &y1)) return;
-            } else {
-                if (!read_int("Enter center X: ", &x1) || !read_int("Enter center Y: ", &y1)) { printf("Invalid input.\n"); return; }
-            }
+        case 1:
+            if (!read_int("Enter center X: ", &x1) || !read_int("Enter center Y: ", &y1)) { printf("Invalid input.\n"); return; }
             if (!read_int("Enter radius: ", &radius)) { printf("Invalid input.\n"); return; }
             add_object(CIRCLE, x1, y1, 0, 0, 0, 0, radius, symbol);
             break;
-        }
-        case 2: {
-            char ans = 'n';
-            if (read_char("Select top-left from canvas row? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-                if (!select_canvas_position("rectangle top-left", &x1, &y1)) return;
-            } else {
-                if (!read_int("Enter top-left X: ", &x1) || !read_int("Enter top-left Y: ", &y1)) { printf("Invalid input.\n"); return; }
-            }
-            if (!read_int("Enter bottom-right X: ", &x2) || !read_int("Enter bottom-right Y: ", &y2)) { printf("Invalid input.\n"); return; }
+        case 2:
+            if (!read_int("Enter top-left X: ", &x1) || !read_int("Enter top-left Y: ", &y1) || !read_int("Enter bottom-right X: ", &x2) || !read_int("Enter bottom-right Y: ", &y2)) { printf("Invalid input.\n"); return; }
             add_object(RECTANGLE, x1, y1, x2, y2, 0, 0, 0, symbol);
             break;
-        }
-        case 3: {
-            char ans = 'n';
-            if (read_char("Select start from canvas row? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-                if (!select_canvas_position("line start", &x1, &y1)) return;
-            } else {
-                if (!read_int("Enter start X: ", &x1) || !read_int("Enter start Y: ", &y1)) { printf("Invalid input.\n"); return; }
-            }
-            if (!read_int("Enter end X: ", &x2) || !read_int("Enter end Y: ", &y2)) { printf("Invalid input.\n"); return; }
+        case 3:
+            if (!read_int("Enter start X: ", &x1) || !read_int("Enter start Y: ", &y1) || !read_int("Enter end X: ", &x2) || !read_int("Enter end Y: ", &y2)) { printf("Invalid input.\n"); return; }
             add_object(LINE, x1, y1, x2, y2, 0, 0, 0, symbol);
             break;
-        }
-        case 4: {
-            char ans = 'n';
-            if (read_char("Select first vertex from canvas row? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-                if (!select_canvas_position("triangle vertex 1", &x1, &y1)) return;
-            } else {
-                if (!read_int("Enter x1: ", &x1) || !read_int("Enter y1: ", &y1)) { printf("Invalid input.\n"); return; }
-            }
-            if (!read_int("Enter x2: ", &x2) || !read_int("Enter y2: ", &y2) || !read_int("Enter x3: ", &x3) || !read_int("Enter y3: ", &y3)) { printf("Invalid input.\n"); return; }
+        case 4:
+            if (!read_int("Enter x1: ", &x1) || !read_int("Enter y1: ", &y1) || !read_int("Enter x2: ", &x2) || !read_int("Enter y2: ", &y2) || !read_int("Enter x3: ", &x3) || !read_int("Enter y3: ", &y3)) { printf("Invalid input.\n"); return; }
             add_object(TRIANGLE, x1, y1, x2, y2, x3, y3, 0, symbol);
             break;
-        }
         default:
             printf("Invalid choice!\n");
     }
@@ -491,4 +438,3 @@ int main() {
     main_menu();
     return 0;
 }
-
