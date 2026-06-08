@@ -368,6 +368,7 @@ void main_menu() {
             case 1:
                 menu_add_object();
                 rebuild_canvas();
+                rebuild_canvas();
                 display_canvas();
                 break;
             case 2: {
