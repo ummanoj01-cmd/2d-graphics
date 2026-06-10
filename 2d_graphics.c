@@ -1,94 +1,417 @@
+/*
+ * graphics_editor.c
+ *
+ * 2D ASCII Graphics Editor
+ *
+ * Program overview:
+ *   This program provides an interactive ASCII canvas of size 40x20.
+ *   Users can create and manage shapes (circle, rectangle, line, triangle)
+ *   with support for outline and filled styles. The editor supports object
+ *   add/delete/modify/move/duplicate/search/list, canvas statistics, undo/redo,
+ *   save/load drawings, export ASCII art, pick/set points, area and
+ *   perimeter calculations, clear all objects, and display the current canvas.
+ *
+ * Data structures:
+ *   Point       - integer canvas coordinate pair.
+ *   Shape       - geometric object stored with endpoints, radius, symbol, and fill state.
+ *   Drawing     - collection of shapes currently on the canvas.
+ *   Canvas      - 40x20 character grid used for rendering.
+ *   History     - undo/redo ring buffer holding snapshots of Drawing state.
+ *
+ * Function guide:
+ *   Input handling    - prompt_string, prompt_integer_range, prompt_char, prompt_yes_no
+ *   Shape creation    - create_shape_for_kind, build_circle, build_rectangle, build_line, build_triangle
+ *   Shape rendering   - render_shape, render_line_segment, render_circle_outline, render_filled_shape
+ *   Measurements      - shape_area, shape_perimeter, point_in_triangle, shape_contains_point
+ *   File operations   - save_drawing_to_file, load_drawing_from_file, export_canvas_ascii
+ *   History management- history_initialize, history_push, history_undo, history_redo
+ *   Search operations - search_by_type, search_by_symbol, search_by_coordinate
+ *   Menu system       - run_editor, execute_menu_action
+ *
+ * Menu operation guide:
+ *   The main menu displays numbered commands. Enter a number to perform actions
+ *   such as adding shapes, deleting objects, viewing the canvas, saving files,
+ *   loading drawings, exporting ASCII art, undoing/redoing history, and exiting.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <math.h>
 
 #define CANVAS_WIDTH 40
 #define CANVAS_HEIGHT 20
 #define MAX_OBJECTS 100
 #define MAX_HISTORY 20
-#define PI 3.14159265358979323846
+#define INPUT_BUFFER 256
+#define SAVE_FILE_SIGNATURE "ASCII2DGRAPHICS"
+#define SAVE_FILE_VERSION 1
 
 typedef enum {
-    CIRCLE,
-    RECTANGLE,
-    LINE,
-    TRIANGLE
-} ShapeType;
+    SHAPE_CIRCLE = 1,
+    SHAPE_RECTANGLE = 2,
+    SHAPE_LINE = 3,
+    SHAPE_TRIANGLE = 4
+} ShapeKind;
 
 typedef struct {
-    ShapeType type;
-    int x1, y1, x2, y2, x3, y3;
+    int x;
+    int y;
+} Point;
+
+typedef struct {
+    ShapeKind kind;
+    Point p1;
+    Point p2;
+    Point p3;
     int radius;
-    char symbol;
-    int filled;
+    char glyph;
+    bool filled;
 } Shape;
 
 typedef struct {
-    Shape snapshot[MAX_OBJECTS];
+    Shape items[MAX_OBJECTS];
     int count;
-} HistoryState;
+} Drawing;
 
-char canvas[CANVAS_HEIGHT][CANVAS_WIDTH];
-Shape objects[MAX_OBJECTS];
-int object_count = 0;
-HistoryState undo_stack[MAX_HISTORY];
-HistoryState redo_stack[MAX_HISTORY];
-int undo_top = -1;
-int redo_top = -1;
+typedef struct {
+    char cells[CANVAS_HEIGHT][CANVAS_WIDTH];
+} Canvas;
 
-void init_canvas() {
-    for (int y = 0; y < CANVAS_HEIGHT; y++) {
-        for (int x = 0; x < CANVAS_WIDTH; x++) {
-            canvas[y][x] = '_';
+typedef struct {
+    Drawing snapshot;
+} HistoryEntry;
+
+typedef struct {
+    HistoryEntry entries[MAX_HISTORY + 1];
+    int current_index;
+    int max_index;
+} History;
+
+static Drawing activeDrawing = { .count = 0 };
+static Canvas activeCanvas;
+static History drawingHistory;
+
+static bool trim_newline(char *text) {
+    size_t length = strlen(text);
+    if (length == 0) {
+        return false;
+    }
+    if (text[length - 1] == '\n') {
+        text[length - 1] = '\0';
+        return true;
+    }
+    return false;
+}
+
+static bool prompt_string(const char *prompt, char *output, size_t size) {
+    if (prompt) {
+        printf("%s", prompt);
+    }
+    if (!fgets(output, (int)size, stdin)) {
+        return false;
+    }
+    trim_newline(output);
+    return output[0] != '\0';
+}
+
+static bool prompt_integer_range(const char *prompt, int *value, int min, int max) {
+    char buffer[INPUT_BUFFER];
+    if (!prompt_string(prompt, buffer, sizeof(buffer))) {
+        return false;
+    }
+    char *end = NULL;
+    long parsed = strtol(buffer, &end, 10);
+    if (end == buffer || *end != '\0') {
+        return false;
+    }
+    if (parsed < min || parsed > max) {
+        return false;
+    }
+    *value = (int)parsed;
+    return true;
+}
+
+static bool prompt_char(const char *prompt, char *output) {
+    char buffer[INPUT_BUFFER];
+    if (!prompt_string(prompt, buffer, sizeof(buffer))) {
+        return false;
+    }
+    for (size_t i = 0; buffer[i] != '\0'; ++i) {
+        if (buffer[i] != ' ' && buffer[i] != '\t') {
+            *output = buffer[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool prompt_yes_no(const char *prompt) {
+    char answer = '\0';
+    if (!prompt_char(prompt, &answer)) {
+        return false;
+    }
+    return answer == 'y' || answer == 'Y';
+}
+
+static bool is_safe_filename(const char *name) {
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+    const char prohibited[] = "\\/:*?\"<>|";
+    for (size_t i = 0; name[i] != '\0'; ++i) {
+        if (name[i] < 32 || strchr(prohibited, name[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static const char *shape_kind_name(ShapeKind kind) {
+    switch (kind) {
+        case SHAPE_CIRCLE: return "Circle";
+        case SHAPE_RECTANGLE: return "Rectangle";
+        case SHAPE_LINE: return "Line";
+        case SHAPE_TRIANGLE: return "Triangle";
+        default: return "Unknown";
+    }
+}
+
+static bool choose_canvas_coordinate(const char *description, Point *out_point) {
+    if (prompt_yes_no("Choose a point from canvas display? (y/n): ")) {
+        int row = 0;
+        if (!prompt_integer_range("Enter row (0..19): ", &row, 0, CANVAS_HEIGHT - 1)) {
+            printf("Row must be between 0 and %d.\n", CANVAS_HEIGHT - 1);
+            return false;
+        }
+        int column = 0;
+        if (!prompt_integer_range("Enter column (0..39): ", &column, 0, CANVAS_WIDTH - 1)) {
+            printf("Column must be between 0 and %d.\n", CANVAS_WIDTH - 1);
+            return false;
+        }
+        out_point->x = column;
+        out_point->y = row;
+        return true;
+    }
+    if (!prompt_integer_range("Enter X coordinate (0..39): ", &out_point->x, 0, CANVAS_WIDTH - 1)) {
+        printf("X must be between 0 and %d.\n", CANVAS_WIDTH - 1);
+        return false;
+    }
+    if (!prompt_integer_range("Enter Y coordinate (0..19): ", &out_point->y, 0, CANVAS_HEIGHT - 1)) {
+        printf("Y must be between 0 and %d.\n", CANVAS_HEIGHT - 1);
+        return false;
+    }
+    return true;
+}
+
+static Shape build_circle(void) {
+    Shape shape;
+    shape.kind = SHAPE_CIRCLE;
+    shape.filled = prompt_yes_no("Fill circle interior? (y/n): ");
+    prompt_char("Enter symbol for circle: ", &shape.glyph);
+    choose_canvas_coordinate("circle center", &shape.p1);
+    prompt_integer_range("Enter radius (0..20): ", &shape.radius, 0, 20);
+    shape.p2.x = shape.p2.y = shape.p3.x = shape.p3.y = 0;
+    return shape;
+}
+
+static Shape build_rectangle(void) {
+    Shape shape;
+    shape.kind = SHAPE_RECTANGLE;
+    shape.filled = prompt_yes_no("Fill rectangle interior? (y/n): ");
+    prompt_char("Enter symbol for rectangle: ", &shape.glyph);
+    choose_canvas_coordinate("rectangle corner 1", &shape.p1);
+    choose_canvas_coordinate("rectangle corner 2", &shape.p2);
+    shape.radius = 0;
+    shape.p3.x = shape.p3.y = 0;
+    return shape;
+}
+
+static Shape build_line(void) {
+    Shape shape;
+    shape.kind = SHAPE_LINE;
+    shape.filled = false;
+    prompt_char("Enter symbol for line: ", &shape.glyph);
+    choose_canvas_coordinate("line start", &shape.p1);
+    choose_canvas_coordinate("line end", &shape.p2);
+    shape.radius = 0;
+    shape.p3.x = shape.p3.y = 0;
+    return shape;
+}
+
+static Shape build_triangle(void) {
+    Shape shape;
+    shape.kind = SHAPE_TRIANGLE;
+    shape.filled = prompt_yes_no("Fill triangle interior? (y/n): ");
+    prompt_char("Enter symbol for triangle: ", &shape.glyph);
+    choose_canvas_coordinate("triangle vertex 1", &shape.p1);
+    choose_canvas_coordinate("triangle vertex 2", &shape.p2);
+    choose_canvas_coordinate("triangle vertex 3", &shape.p3);
+    shape.radius = 0;
+    return shape;
+}
+
+static bool create_shape_for_kind(ShapeKind kind, Shape *shape) {
+    if (shape == NULL) {
+        return false;
+    }
+    switch (kind) {
+        case SHAPE_CIRCLE:
+            *shape = build_circle();
+            return true;
+        case SHAPE_RECTANGLE:
+            *shape = build_rectangle();
+            return true;
+        case SHAPE_LINE:
+            *shape = build_line();
+            return true;
+        case SHAPE_TRIANGLE:
+            *shape = build_triangle();
+            return true;
+        default:
+            return false;
+    }
+}
+
+static double calculate_distance(Point a, Point b) {
+    double dx = (double)(a.x - b.x);
+    double dy = (double)(a.y - b.y);
+    return sqrt(dx * dx + dy * dy);
+}
+
+static double shape_area(const Shape *shape) {
+    if (shape == NULL) {
+        return 0.0;
+    }
+    switch (shape->kind) {
+        case SHAPE_CIRCLE:
+            return M_PI * shape->radius * shape->radius;
+        case SHAPE_RECTANGLE: {
+            int width = abs(shape->p2.x - shape->p1.x);
+            int height = abs(shape->p2.y - shape->p1.y);
+            return (double)width * height;
+        }
+        case SHAPE_LINE:
+            return 0.0;
+        case SHAPE_TRIANGLE: {
+            double dx1 = shape->p2.x - shape->p1.x;
+            double dy1 = shape->p2.y - shape->p1.y;
+            double dx2 = shape->p3.x - shape->p1.x;
+            double dy2 = shape->p3.y - shape->p1.y;
+            return fabs((dx1 * dy2 - dx2 * dy1) * 0.5);
+        }
+        default:
+            return 0.0;
+    }
+}
+
+static double shape_perimeter(const Shape *shape) {
+    if (shape == NULL) {
+        return 0.0;
+    }
+    switch (shape->kind) {
+        case SHAPE_CIRCLE:
+            return 2.0 * M_PI * shape->radius;
+        case SHAPE_RECTANGLE: {
+            int width = abs(shape->p2.x - shape->p1.x);
+            int height = abs(shape->p2.y - shape->p1.y);
+            return 2.0 * (width + height);
+        }
+        case SHAPE_LINE:
+            return calculate_distance(shape->p1, shape->p2);
+        case SHAPE_TRIANGLE:
+            return calculate_distance(shape->p1, shape->p2)
+                 + calculate_distance(shape->p2, shape->p3)
+                 + calculate_distance(shape->p3, shape->p1);
+        default:
+            return 0.0;
+    }
+}
+
+static bool point_in_triangle(Point p, Point a, Point b, Point c) {
+    double denominator = ((b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y));
+    if (denominator == 0.0) {
+        return false;
+    }
+    double wa = ((b.y - c.y) * (p.x - c.x) + (c.x - b.x) * (p.y - c.y)) / denominator;
+    double wb = ((c.y - a.y) * (p.x - c.x) + (a.x - c.x) * (p.y - c.y)) / denominator;
+    double wc = 1.0 - wa - wb;
+    return wa >= 0.0 && wb >= 0.0 && wc >= 0.0;
+}
+
+static bool shape_contains_point(const Shape *shape, Point location) {
+    if (shape == NULL) {
+        return false;
+    }
+    switch (shape->kind) {
+        case SHAPE_CIRCLE: {
+            int dx = location.x - shape->p1.x;
+            int dy = location.y - shape->p1.y;
+            return dx * dx + dy * dy <= shape->radius * shape->radius;
+        }
+        case SHAPE_RECTANGLE: {
+            int left = shape->p1.x < shape->p2.x ? shape->p1.x : shape->p2.x;
+            int right = shape->p1.x < shape->p2.x ? shape->p2.x : shape->p1.x;
+            int top = shape->p1.y < shape->p2.y ? shape->p1.y : shape->p2.y;
+            int bottom = shape->p1.y < shape->p2.y ? shape->p2.y : shape->p1.y;
+            return location.x >= left && location.x <= right &&
+                   location.y >= top && location.y <= bottom;
+        }
+        case SHAPE_LINE: {
+            int dx = shape->p2.x - shape->p1.x;
+            int dy = shape->p2.y - shape->p1.y;
+            int dxp = location.x - shape->p1.x;
+            int dyp = location.y - shape->p1.y;
+            if (dx * dyp != dy * dxp) {
+                return false;
+            }
+            if (abs(dx) >= abs(dy)) {
+                int minx = shape->p1.x < shape->p2.x ? shape->p1.x : shape->p2.x;
+                int maxx = shape->p1.x < shape->p2.x ? shape->p2.x : shape->p1.x;
+                return location.x >= minx && location.x <= maxx;
+            }
+            int miny = shape->p1.y < shape->p2.y ? shape->p1.y : shape->p2.y;
+            int maxy = shape->p1.y < shape->p2.y ? shape->p2.y : shape->p1.y;
+            return location.y >= miny && location.y <= maxy;
+        }
+        case SHAPE_TRIANGLE:
+            return point_in_triangle(location, shape->p1, shape->p2, shape->p3);
+        default:
+            return false;
+    }
+}
+
+static void canvas_clear(Canvas *canvas) {
+    for (int row = 0; row < CANVAS_HEIGHT; ++row) {
+        for (int col = 0; col < CANVAS_WIDTH; ++col) {
+            canvas->cells[row][col] = '_';
         }
     }
 }
 
-int read_line(char *buf, int size) {
-    if (!fgets(buf, size, stdin)) return 0;
-    size_t len = strlen(buf);
-    if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
-    return 1;
-}
-
-int read_int(const char *prompt, int *out) {
-    char buf[128];
-    if (prompt) printf("%s", prompt);
-    if (!read_line(buf, sizeof(buf))) return 0;
-    char *endptr;
-    long v = strtol(buf, &endptr, 10);
-    if (endptr == buf) return 0;
-    *out = (int)v;
-    return 1;
-}
-
-int read_char(const char *prompt, char *out) {
-    char buf[16];
-    if (prompt) printf("%s", prompt);
-    if (!read_line(buf, sizeof(buf))) return 0;
-    if (buf[0] == '\0') return 0;
-    *out = buf[0];
-    return 1;
-}
-
-void draw_point(int x, int y, char symbol) {
-    if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT) {
-        canvas[y][x] = symbol;
+static void canvas_plot(Canvas *canvas, int x, int y, char glyph) {
+    if (x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) {
+        return;
     }
+    canvas->cells[y][x] = glyph;
 }
 
-void draw_line(int x0, int y0, int x1, int y1, char symbol) {
-    int dx = abs(x1 - x0);
-    int dy = abs(y1 - y0);
-    int sx = (x0 < x1) ? 1 : -1;
-    int sy = (y0 < y1) ? 1 : -1;
+static void render_line_segment(Canvas *canvas, Point a, Point b, char glyph) {
+    int dx = abs(b.x - a.x);
+    int dy = abs(b.y - a.y);
+    int sx = a.x < b.x ? 1 : -1;
+    int sy = a.y < b.y ? 1 : -1;
     int err = dx - dy;
-    int x = x0, y = y0;
-    while (1) {
-        draw_point(x, y, symbol);
-        if (x == x1 && y == y1) break;
-        int e2 = 2 * err;
+    int x = a.x;
+    int y = a.y;
+
+    while (true) {
+        canvas_plot(canvas, x, y, glyph);
+        if (x == b.x && y == b.y) {
+            break;
+        }
+        int e2 = err * 2;
         if (e2 > -dy) {
             err -= dy;
             x += sx;
@@ -100,891 +423,839 @@ void draw_line(int x0, int y0, int x1, int y1, char symbol) {
     }
 }
 
-void draw_rectangle(int x1, int y1, int x2, int y2, char symbol) {
-    int min_x = (x1 < x2) ? x1 : x2;
-    int max_x = (x1 < x2) ? x2 : x1;
-    int min_y = (y1 < y2) ? y1 : y2;
-    int max_y = (y1 < y2) ? y2 : y1;
-    for (int x = min_x; x <= max_x; x++) {
-        draw_point(x, min_y, symbol);
-        draw_point(x, max_y, symbol);
-    }
-    for (int y = min_y; y <= max_y; y++) {
-        draw_point(min_x, y, symbol);
-        draw_point(max_x, y, symbol);
-    }
+static void render_rectangle_outline(Canvas *canvas, Point a, Point b, char glyph) {
+    Point c = { a.x, b.y };
+    Point d = { b.x, a.y };
+    render_line_segment(canvas, a, c, glyph);
+    render_line_segment(canvas, c, b, glyph);
+    render_line_segment(canvas, b, d, glyph);
+    render_line_segment(canvas, d, a, glyph);
 }
 
-void fill_rectangle(int x1, int y1, int x2, int y2, char symbol) {
-    int min_x = (x1 < x2) ? x1 : x2;
-    int max_x = (x1 < x2) ? x2 : x1;
-    int min_y = (y1 < y2) ? y1 : y2;
-    int max_y = (y1 < y2) ? y2 : y1;
-    for (int y = min_y; y <= max_y; y++) {
-        for (int x = min_x; x <= max_x; x++) {
-            draw_point(x, y, symbol);
-        }
-    }
+static void render_triangle_outline(Canvas *canvas, const Shape *shape) {
+    render_line_segment(canvas, shape->p1, shape->p2, shape->glyph);
+    render_line_segment(canvas, shape->p2, shape->p3, shape->glyph);
+    render_line_segment(canvas, shape->p3, shape->p1, shape->glyph);
 }
 
-void draw_circle(int cx, int cy, int radius, char symbol) {
-    int x = 0;
-    int y = radius;
-    int d = 3 - 2 * radius;
-    while (x <= y) {
-        draw_point(cx + x, cy + y, symbol);
-        draw_point(cx - x, cy + y, symbol);
-        draw_point(cx + x, cy - y, symbol);
-        draw_point(cx - x, cy - y, symbol);
-        draw_point(cx + y, cy + x, symbol);
-        draw_point(cx - y, cy + x, symbol);
-        draw_point(cx + y, cy - x, symbol);
-        draw_point(cx - y, cy - x, symbol);
-        if (d < 0) {
-            d += 4 * x + 6;
+static void render_circle_outline(Canvas *canvas, Point center, int radius, char glyph) {
+    int x = radius;
+    int y = 0;
+    int decision = 1 - radius;
+
+    while (y <= x) {
+        canvas_plot(canvas, center.x + x, center.y + y, glyph);
+        canvas_plot(canvas, center.x - x, center.y + y, glyph);
+        canvas_plot(canvas, center.x + x, center.y - y, glyph);
+        canvas_plot(canvas, center.x - x, center.y - y, glyph);
+        canvas_plot(canvas, center.x + y, center.y + x, glyph);
+        canvas_plot(canvas, center.x - y, center.y + x, glyph);
+        canvas_plot(canvas, center.x + y, center.y - x, glyph);
+        canvas_plot(canvas, center.x - y, center.y - x, glyph);
+        y += 1;
+        if (decision <= 0) {
+            decision += 2 * y + 1;
         } else {
-            d += 4 * (x - y) + 10;
-            y--;
-        }
-        x++;
-    }
-}
-
-void fill_circle(int cx, int cy, int radius, char symbol) {
-    for (int y = cy - radius; y <= cy + radius; y++) {
-        for (int x = cx - radius; x <= cx + radius; x++) {
-            int dx = x - cx;
-            int dy = y - cy;
-            if (dx * dx + dy * dy <= radius * radius) {
-                draw_point(x, y, symbol);
-            }
+            x -= 1;
+            decision += 2 * (y - x) + 1;
         }
     }
 }
 
-void draw_triangle(int x1, int y1, int x2, int y2, int x3, int y3, char symbol) {
-    draw_line(x1, y1, x2, y2, symbol);
-    draw_line(x2, y2, x3, y3, symbol);
-    draw_line(x3, y3, x1, y1, symbol);
-}
+static void render_filled_shape(Canvas *canvas, const Shape *shape) {
+    int x_min = CANVAS_WIDTH;
+    int x_max = 0;
+    int y_min = CANVAS_HEIGHT;
+    int y_max = 0;
 
-int triangle_sign(int x1, int y1, int x2, int y2, int x3, int y3) {
-    return (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3);
-}
-
-int point_in_triangle(int px, int py, int x1, int y1, int x2, int y2, int x3, int y3) {
-    int d1 = triangle_sign(px, py, x1, y1, x2, y2);
-    int d2 = triangle_sign(px, py, x2, y2, x3, y3);
-    int d3 = triangle_sign(px, py, x3, y3, x1, y1);
-    int has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0);
-    int has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0);
-    return !(has_neg && has_pos);
-}
-
-void fill_triangle(int x1, int y1, int x2, int y2, int x3, int y3, char symbol) {
-    int min_x = x1;
-    int max_x = x1;
-    int min_y = y1;
-    int max_y = y1;
-    if (x2 < min_x) min_x = x2;
-    if (x3 < min_x) min_x = x3;
-    if (x2 > max_x) max_x = x2;
-    if (x3 > max_x) max_x = x3;
-    if (y2 < min_y) min_y = y2;
-    if (y3 < min_y) min_y = y3;
-    if (y2 > max_y) max_y = y2;
-    if (y3 > max_y) max_y = y3;
-    for (int y = min_y; y <= max_y; y++) {
-        for (int x = min_x; x <= max_x; x++) {
-            if (point_in_triangle(x, y, x1, y1, x2, y2, x3, y3)) {
-                draw_point(x, y, symbol);
-            }
-        }
-    }
-}
-
-void copy_state_to_snapshot(HistoryState *state) {
-    state->count = object_count;
-    for (int i = 0; i < object_count; i++) {
-        state->snapshot[i] = objects[i];
-    }
-}
-
-void restore_snapshot_to_state(const HistoryState *state) {
-    object_count = state->count;
-    for (int i = 0; i < object_count; i++) {
-        objects[i] = state->snapshot[i];
-    }
-}
-
-void clear_redo() {
-    redo_top = -1;
-}
-
-void push_undo_state() {
-    if (undo_top < MAX_HISTORY - 1) {
-        undo_top++;
+    if (shape->kind == SHAPE_CIRCLE) {
+        x_min = shape->p1.x - shape->radius;
+        x_max = shape->p1.x + shape->radius;
+        y_min = shape->p1.y - shape->radius;
+        y_max = shape->p1.y + shape->radius;
+    } else if (shape->kind == SHAPE_RECTANGLE) {
+        x_min = shape->p1.x < shape->p2.x ? shape->p1.x : shape->p2.x;
+        x_max = shape->p1.x < shape->p2.x ? shape->p2.x : shape->p1.x;
+        y_min = shape->p1.y < shape->p2.y ? shape->p1.y : shape->p2.y;
+        y_max = shape->p1.y < shape->p2.y ? shape->p2.y : shape->p1.y;
+    } else if (shape->kind == SHAPE_TRIANGLE) {
+        x_min = shape->p1.x;
+        x_max = shape->p1.x;
+        y_min = shape->p1.y;
+        y_max = shape->p1.y;
+        if (shape->p2.x < x_min) x_min = shape->p2.x;
+        if (shape->p3.x < x_min) x_min = shape->p3.x;
+        if (shape->p2.x > x_max) x_max = shape->p2.x;
+        if (shape->p3.x > x_max) x_max = shape->p3.x;
+        if (shape->p2.y < y_min) y_min = shape->p2.y;
+        if (shape->p3.y < y_min) y_min = shape->p3.y;
+        if (shape->p2.y > y_max) y_max = shape->p2.y;
+        if (shape->p3.y > y_max) y_max = shape->p3.y;
     } else {
-        for (int i = 0; i < MAX_HISTORY - 1; i++) {
-            undo_stack[i] = undo_stack[i + 1];
-        }
+        x_min = x_max = shape->p1.x;
+        y_min = y_max = shape->p1.y;
     }
-    copy_state_to_snapshot(&undo_stack[undo_top]);
-    clear_redo();
-}
 
-int can_undo() {
-    return undo_top >= 0;
-}
+    if (x_min < 0) x_min = 0;
+    if (y_min < 0) y_min = 0;
+    if (x_max >= CANVAS_WIDTH) x_max = CANVAS_WIDTH - 1;
+    if (y_max >= CANVAS_HEIGHT) y_max = CANVAS_HEIGHT - 1;
 
-int can_redo() {
-    return redo_top >= 0;
-}
-
-void push_redo_state() {
-    if (redo_top < MAX_HISTORY - 1) {
-        redo_top++;
-    } else {
-        for (int i = 0; i < MAX_HISTORY - 1; i++) {
-            redo_stack[i] = redo_stack[i + 1];
-        }
-    }
-    copy_state_to_snapshot(&redo_stack[redo_top]);
-}
-
-void rebuild_canvas(void);
-
-void undo() {
-    if (!can_undo()) {
-        printf("Nothing to undo.\n");
-        return;
-    }
-    push_redo_state();
-    restore_snapshot_to_state(&undo_stack[undo_top]);
-    undo_top--;
-    rebuild_canvas();
-    printf("Undo completed.\n");
-}
-
-void redo() {
-    if (!can_redo()) {
-        printf("Nothing to redo.\n");
-        return;
-    }
-    push_undo_state();
-    restore_snapshot_to_state(&redo_stack[redo_top]);
-    redo_top--;
-    rebuild_canvas();
-    printf("Redo completed.\n");
-}
-
-int add_object(ShapeType type, int x1, int y1, int x2, int y2, int x3, int y3, int radius, char symbol, int filled) {
-    if (object_count >= MAX_OBJECTS) {
-        printf("Error: Maximum number of objects reached!\n");
-        return -1;
-    }
-    objects[object_count].type = type;
-    objects[object_count].x1 = x1;
-    objects[object_count].y1 = y1;
-    objects[object_count].x2 = x2;
-    objects[object_count].y2 = y2;
-    objects[object_count].x3 = x3;
-    objects[object_count].y3 = y3;
-    objects[object_count].radius = radius;
-    objects[object_count].symbol = symbol;
-    objects[object_count].filled = filled;
-    printf("Object %d added successfully!\n", object_count);
-    return object_count++;
-}
-
-void delete_object(int index) {
-    if (index < 0 || index >= object_count) {
-        printf("Error: Invalid object index!\n");
-        return;
-    }
-    for (int i = index; i < object_count - 1; i++) {
-        objects[i] = objects[i + 1];
-    }
-    object_count--;
-    printf("Object deleted successfully! Remaining objects: %d\n", object_count);
-}
-
-void move_object(int index, int dx, int dy) {
-    if (index < 0 || index >= object_count) {
-        printf("Error: Invalid object index!\n");
-        return;
-    }
-    Shape *shape = &objects[index];
-    shape->x1 += dx;
-    shape->y1 += dy;
-    shape->x2 += dx;
-    shape->y2 += dy;
-    shape->x3 += dx;
-    shape->y3 += dy;
-    printf("Object %d moved by (%d, %d).\n", index, dx, dy);
-}
-
-void duplicate_object(int index) {
-    if (index < 0 || index >= object_count) {
-        printf("Error: Invalid object index!\n");
-        return;
-    }
-    if (object_count >= MAX_OBJECTS) {
-        printf("Error: Maximum number of objects reached!\n");
-        return;
-    }
-    objects[object_count] = objects[index];
-    printf("Object %d duplicated at index %d.\n", index, object_count);
-    object_count++;
-}
-
-void modify_object(int index) {
-    if (index < 0 || index >= object_count) {
-        printf("Error: Invalid object index!\n");
-        return;
-    }
-    Shape *shape = &objects[index];
-    printf("Modifying object %d:\n", index);
-    printf("Current symbol: %c\n", shape->symbol);
-    char tmp_ch;
-    if (!read_char("Enter new symbol (or same symbol to keep): ", &tmp_ch)) { printf("Invalid input.\n"); return; }
-    shape->symbol = tmp_ch;
-    if (shape->type == CIRCLE || shape->type == RECTANGLE || shape->type == TRIANGLE) {
-        char fillAns = 'n';
-        if (read_char("Fill shape interior? (y/n): ", &fillAns) && (fillAns == 'y' || fillAns == 'Y')) {
-            shape->filled = 1;
-        } else {
-            shape->filled = 0;
-        }
-    }
-    switch (shape->type) {
-        case CIRCLE:
-            if (!read_int("Enter new center X: ", &shape->x1) || !read_int("Enter new center Y: ", &shape->y1) || !read_int("Enter new radius: ", &shape->radius)) { printf("Invalid input.\n"); return; }
-            break;
-        case RECTANGLE:
-            if (!read_int("Enter top-left X: ", &shape->x1) || !read_int("Enter top-left Y: ", &shape->y1) || !read_int("Enter bottom-right X: ", &shape->x2) || !read_int("Enter bottom-right Y: ", &shape->y2)) { printf("Invalid input.\n"); return; }
-            break;
-        case LINE:
-            if (!read_int("Enter start X: ", &shape->x1) || !read_int("Enter start Y: ", &shape->y1) || !read_int("Enter end X: ", &shape->x2) || !read_int("Enter end Y: ", &shape->y2)) { printf("Invalid input.\n"); return; }
-            break;
-        case TRIANGLE:
-            if (!read_int("Enter x1: ", &shape->x1) || !read_int("Enter y1: ", &shape->y1) || !read_int("Enter x2: ", &shape->x2) || !read_int("Enter y2: ", &shape->y2) || !read_int("Enter x3: ", &shape->x3) || !read_int("Enter y3: ", &shape->y3)) { printf("Invalid input.\n"); return; }
-            break;
-    }
-    printf("Object %d modified successfully!\n", index);
-}
-
-void rebuild_canvas() {
-    init_canvas();
-    for (int i = 0; i < object_count; i++) {
-        Shape *shape = &objects[i];
-        switch (shape->type) {
-            case CIRCLE:
-                if (shape->filled) fill_circle(shape->x1, shape->y1, shape->radius, shape->symbol);
-                else draw_circle(shape->x1, shape->y1, shape->radius, shape->symbol);
-                break;
-            case RECTANGLE:
-                if (shape->filled) fill_rectangle(shape->x1, shape->y1, shape->x2, shape->y2, shape->symbol);
-                else draw_rectangle(shape->x1, shape->y1, shape->x2, shape->y2, shape->symbol);
-                break;
-            case LINE:
-                draw_line(shape->x1, shape->y1, shape->x2, shape->y2, shape->symbol);
-                break;
-            case TRIANGLE:
-                if (shape->filled) fill_triangle(shape->x1, shape->y1, shape->x2, shape->y2, shape->x3, shape->y3, shape->symbol);
-                else draw_triangle(shape->x1, shape->y1, shape->x2, shape->y2, shape->x3, shape->y3, shape->symbol);
-                break;
-        }
-    }
-}
-
-void display_canvas() {
-    printf("\n");
-    for (int y = 0; y < CANVAS_HEIGHT; y++) {
-        for (int x = 0; x < CANVAS_WIDTH; x++) {
-            printf("%c", canvas[y][x]);
-        }
-        printf("\n");
-    }
-    printf("\n");
-}
-
-void pick_point() {
-    int y, x;
-    printf("\n=== Pick/Set Point ===\n");
-    if (!read_int("Enter row (0..19): ", &y)) { printf("Invalid input.\n"); return; }
-    if (y < 0 || y >= CANVAS_HEIGHT) { printf("Row out of range.\n"); return; }
-    printf("Index: ");
-    for (int i = 0; i < CANVAS_WIDTH; i++) printf("%d", i % 10);
-    printf("\nRow %d:  ", y);
-    for (int i = 0; i < CANVAS_WIDTH; i++) putchar(canvas[y][i]);
-    printf("\n");
-    if (!read_int("Enter column (0..39): ", &x)) { printf("Invalid input.\n"); return; }
-    if (x < 0 || x >= CANVAS_WIDTH) { printf("Column out of range.\n"); return; }
-    printf("Character at (%d,%d) = '%c'\n", x, y, canvas[y][x]);
-    char ans = 'n';
-    if (!read_char("Do you want to change it? (y/n): ", &ans)) { printf("Invalid input.\n"); return; }
-    if (ans == 'y' || ans == 'Y') {
-        char symbol;
-        if (!read_char("Enter new symbol: ", &symbol)) { printf("Invalid input.\n"); return; }
-        push_undo_state();
-        add_object(LINE, x, y, x, y, 0, 0, 0, symbol, 0);
-        rebuild_canvas();
-        clear_redo();
-        printf("Point set at (%d,%d) with symbol '%c'.\n", x, y, symbol);
-    } else {
-        printf("No change made.\n");
-    }
-}
-
-int select_canvas_position(const char *label, int *out_x, int *out_y) {
-    int y, x;
-    printf("\n=== Select %s Position ===\n", label);
-    if (!read_int("Enter row (0..19): ", &y)) { printf("Invalid input.\n"); return 0; }
-    if (y < 0 || y >= CANVAS_HEIGHT) { printf("Row out of range.\n"); return 0; }
-    printf("Index: ");
-    for (int i = 0; i < CANVAS_WIDTH; i++) printf("%d", i % 10);
-    printf("\nRow %d:  ", y);
-    for (int i = 0; i < CANVAS_WIDTH; i++) putchar(canvas[y][i]);
-    printf("\n");
-    if (!read_int("Enter column (0..39): ", &x)) { printf("Invalid input.\n"); return 0; }
-    if (x < 0 || x >= CANVAS_WIDTH) { printf("Column out of range.\n"); return 0; }
-    *out_x = x;
-    *out_y = y;
-    return 1;
-}
-
-void list_objects() {
-    if (object_count == 0) {
-        printf("No objects in the picture.\n");
-        return;
-    }
-    printf("\n=== Objects in Picture ===\n");
-    for (int i = 0; i < object_count; i++) {
-        printf("%d. ", i);
-        switch (objects[i].type) {
-            case CIRCLE:
-                printf("Circle at (%d, %d) radius=%d symbol='%c' %s\n",
-                       objects[i].x1, objects[i].y1, objects[i].radius, objects[i].symbol,
-                       objects[i].filled ? "filled" : "outline");
-                break;
-            case RECTANGLE:
-                printf("Rectangle from (%d, %d) to (%d, %d) symbol='%c' %s\n",
-                       objects[i].x1, objects[i].y1, objects[i].x2, objects[i].y2, objects[i].symbol,
-                       objects[i].filled ? "filled" : "outline");
-                break;
-            case LINE:
-                printf("Line from (%d, %d) to (%d, %d) symbol='%c'\n",
-                       objects[i].x1, objects[i].y1, objects[i].x2, objects[i].y2, objects[i].symbol);
-                break;
-            case TRIANGLE:
-                printf("Triangle (%d, %d) (%d, %d) (%d, %d) symbol='%c' %s\n",
-                       objects[i].x1, objects[i].y1, objects[i].x2, objects[i].y2,
-                       objects[i].x3, objects[i].y3, objects[i].symbol,
-                       objects[i].filled ? "filled" : "outline");
-                break;
-        }
-    }
-    printf("\n");
-}
-
-void save_drawing(const char *filename) {
-    FILE *file = fopen(filename, "w");
-    if (!file) {
-        printf("Error: Could not open file '%s' for writing.\n", filename);
-        return;
-    }
-    fprintf(file, "%d\n", object_count);
-    for (int i = 0; i < object_count; i++) {
-        Shape *shape = &objects[i];
-        fprintf(file, "%d %d %d %d %d %d %d %d %c\n",
-                shape->type, shape->x1, shape->y1, shape->x2, shape->y2,
-                shape->x3, shape->y3, shape->radius, shape->symbol);
-        fprintf(file, "%d\n", shape->filled);
-    }
-    fclose(file);
-    printf("Drawing saved to '%s'.\n", filename);
-}
-
-void load_drawing(const char *filename) {
-    FILE *file = fopen(filename, "r");
-    if (!file) {
-        printf("Error: Could not open file '%s'.\n", filename);
-        return;
-    }
-    int count;
-    if (fscanf(file, "%d", &count) != 1 || count < 0 || count > MAX_OBJECTS) {
-        printf("Error: Invalid file format.\n");
-        fclose(file);
-        return;
-    }
-    Shape loaded[MAX_OBJECTS];
-    for (int i = 0; i < count; i++) {
-        int type, x1, y1, x2, y2, x3, y3, radius, filled;
-        char symbol;
-        if (fscanf(file, "%d %d %d %d %d %d %d %d %c", &type, &x1, &y1, &x2, &y2, &x3, &y3, &radius, &symbol) != 9) {
-            printf("Error: Invalid object data in file.\n");
-            fclose(file);
-            return;
-        }
-        if (fscanf(file, "%d", &filled) != 1) {
-            printf("Error: Invalid fill state in file.\n");
-            fclose(file);
-            return;
-        }
-        if (type < 0 || type > TRIANGLE) {
-            printf("Error: Invalid shape type in file.\n");
-            fclose(file);
-            return;
-        }
-        loaded[i].type = (ShapeType)type;
-        loaded[i].x1 = x1;
-        loaded[i].y1 = y1;
-        loaded[i].x2 = x2;
-        loaded[i].y2 = y2;
-        loaded[i].x3 = x3;
-        loaded[i].y3 = y3;
-        loaded[i].radius = radius;
-        loaded[i].symbol = symbol;
-        loaded[i].filled = filled ? 1 : 0;
-    }
-    fclose(file);
-    push_undo_state();
-    for (int i = 0; i < count; i++) {
-        objects[i] = loaded[i];
-    }
-    object_count = count;
-    rebuild_canvas();
-    clear_redo();
-    printf("Drawing loaded from '%s'.\n", filename);
-}
-
-void export_ascii_art(const char *filename) {
-    rebuild_canvas();
-    FILE *file = fopen(filename, "w");
-    if (!file) {
-        printf("Error: Could not open file '%s' for writing.\n", filename);
-        return;
-    }
-    for (int y = 0; y < CANVAS_HEIGHT; y++) {
-        for (int x = 0; x < CANVAS_WIDTH; x++) {
-            fputc(canvas[y][x], file);
-        }
-        fputc('\n', file);
-    }
-    fclose(file);
-    printf("ASCII canvas exported to '%s'.\n", filename);
-}
-
-double shape_area(const Shape *shape) {
-    switch (shape->type) {
-        case CIRCLE:
-            return PI * shape->radius * shape->radius;
-        case RECTANGLE: {
-            int width = abs(shape->x2 - shape->x1);
-            int height = abs(shape->y2 - shape->y1);
-            return width * height;
-        }
-        case LINE:
-            return 0.0;
-        case TRIANGLE:
-            return fabs((shape->x1 * (shape->y2 - shape->y3) + shape->x2 * (shape->y3 - shape->y1) + shape->x3 * (shape->y1 - shape->y2)) / 2.0);
-    }
-    return 0.0;
-}
-
-double shape_perimeter(const Shape *shape) {
-    switch (shape->type) {
-        case CIRCLE:
-            return 2.0 * PI * shape->radius;
-        case RECTANGLE: {
-            int width = abs(shape->x2 - shape->x1);
-            int height = abs(shape->y2 - shape->y1);
-            return 2.0 * (width + height);
-        }
-        case LINE: {
-            double dx = shape->x2 - shape->x1;
-            double dy = shape->y2 - shape->y1;
-            return sqrt(dx * dx + dy * dy);
-        }
-        case TRIANGLE: {
-            double dx1 = shape->x2 - shape->x1;
-            double dy1 = shape->y2 - shape->y1;
-            double dx2 = shape->x3 - shape->x2;
-            double dy2 = shape->y3 - shape->y2;
-            double dx3 = shape->x1 - shape->x3;
-            double dy3 = shape->y1 - shape->y3;
-            return sqrt(dx1*dx1 + dy1*dy1) + sqrt(dx2*dx2 + dy2*dy2) + sqrt(dx3*dx3 + dy3*dy3);
-        }
-    }
-    return 0.0;
-}
-
-int shape_contains_coordinate(const Shape *shape, int x, int y) {
-    switch (shape->type) {
-        case CIRCLE: {
-            int dx = x - shape->x1;
-            int dy = y - shape->y1;
-            return dx*dx + dy*dy <= shape->radius * shape->radius;
-        }
-        case RECTANGLE: {
-            int min_x = (shape->x1 < shape->x2) ? shape->x1 : shape->x2;
-            int max_x = (shape->x1 < shape->x2) ? shape->x2 : shape->x1;
-            int min_y = (shape->y1 < shape->y2) ? shape->y1 : shape->y2;
-            int max_y = (shape->y1 < shape->y2) ? shape->y2 : shape->y1;
-            return x >= min_x && x <= max_x && y >= min_y && y <= max_y;
-        }
-        case LINE: {
-            int dx = shape->x2 - shape->x1;
-            int dy = shape->y2 - shape->y1;
-            int dx1 = x - shape->x1;
-            int dy1 = y - shape->y1;
-            int cross = dx * dy1 - dy * dx1;
-            if (cross != 0) return 0;
-            if (dx != 0) {
-                int min_x = (shape->x1 < shape->x2) ? shape->x1 : shape->x2;
-                int max_x = (shape->x1 < shape->x2) ? shape->x2 : shape->x1;
-                return x >= min_x && x <= max_x;
+    for (int row = y_min; row <= y_max; ++row) {
+        for (int col = x_min; col <= x_max; ++col) {
+            Point test = { col, row };
+            if (shape_contains_point(shape, test)) {
+                canvas_plot(canvas, col, row, shape->glyph);
             }
-            if (dy != 0) {
-                int min_y = (shape->y1 < shape->y2) ? shape->y1 : shape->y2;
-                int max_y = (shape->y1 < shape->y2) ? shape->y2 : shape->y1;
-                return y >= min_y && y <= max_y;
-            }
-            return x == shape->x1 && y == shape->y1;
         }
-        case TRIANGLE:
-            return point_in_triangle(x, y, shape->x1, shape->y1, shape->x2, shape->y2, shape->x3, shape->y3);
     }
-    return 0;
 }
 
-void display_canvas_statistics() {
-    int circles = 0, rectangles = 0, lines = 0, triangles = 0;
-    for (int i = 0; i < object_count; i++) {
-        switch (objects[i].type) {
-            case CIRCLE: circles++; break;
-            case RECTANGLE: rectangles++; break;
-            case LINE: lines++; break;
-            case TRIANGLE: triangles++; break;
+static void render_shape(Canvas *canvas, const Shape *shape) {
+    if (shape == NULL || canvas == NULL) {
+        return;
+    }
+    if (shape->filled && shape->kind != SHAPE_LINE) {
+        render_filled_shape(canvas, shape);
+        return;
+    }
+    switch (shape->kind) {
+        case SHAPE_CIRCLE:
+            render_circle_outline(canvas, shape->p1, shape->radius, shape->glyph);
+            break;
+        case SHAPE_RECTANGLE:
+            render_rectangle_outline(canvas, shape->p1, shape->p2, shape->glyph);
+            break;
+        case SHAPE_LINE:
+            render_line_segment(canvas, shape->p1, shape->p2, shape->glyph);
+            break;
+        case SHAPE_TRIANGLE:
+            render_triangle_outline(canvas, shape);
+            break;
+        default:
+            break;
+    }
+}
+
+static void refresh_canvas(Canvas *canvas, const Drawing *drawing) {
+    canvas_clear(canvas);
+    if (drawing == NULL) {
+        return;
+    }
+    for (int index = 0; index < drawing->count; ++index) {
+        render_shape(canvas, &drawing->items[index]);
+    }
+}
+
+static void display_canvas(const Canvas *canvas) {
+    if (canvas == NULL) {
+        return;
+    }
+    printf("\n");
+    for (int row = 0; row < CANVAS_HEIGHT; ++row) {
+        for (int col = 0; col < CANVAS_WIDTH; ++col) {
+            putchar(canvas->cells[row][col]);
+        }
+        putchar('\n');
+    }
+    printf("\n");
+}
+
+static bool shape_index_valid(int index) {
+    return index >= 0 && index < activeDrawing.count;
+}
+
+static bool add_shape_to_drawing(const Shape *shape) {
+    if (shape == NULL || activeDrawing.count >= MAX_OBJECTS) {
+        return false;
+    }
+    activeDrawing.items[activeDrawing.count++] = *shape;
+    return true;
+}
+
+static bool delete_shape_from_drawing(int index) {
+    if (!shape_index_valid(index)) {
+        return false;
+    }
+    for (int i = index; i + 1 < activeDrawing.count; ++i) {
+        activeDrawing.items[i] = activeDrawing.items[i + 1];
+    }
+    activeDrawing.count -= 1;
+    return true;
+}
+
+static bool duplicate_shape_in_drawing(int index) {
+    if (!shape_index_valid(index) || activeDrawing.count >= MAX_OBJECTS) {
+        return false;
+    }
+    activeDrawing.items[activeDrawing.count++] = activeDrawing.items[index];
+    return true;
+}
+
+static bool move_shape_in_drawing(int index, int dx, int dy) {
+    if (!shape_index_valid(index)) {
+        return false;
+    }
+    Shape *shape = &activeDrawing.items[index];
+    shape->p1.x += dx; shape->p1.y += dy;
+    shape->p2.x += dx; shape->p2.y += dy;
+    shape->p3.x += dx; shape->p3.y += dy;
+    return true;
+}
+
+static void clear_drawing(void) {
+    activeDrawing.count = 0;
+}
+
+static void replace_shape_fields(Shape *shape) {
+    if (shape == NULL) {
+        return;
+    }
+    prompt_char("Enter a new symbol (single character): ", &shape->glyph);
+    if (shape->kind != SHAPE_LINE) {
+        shape->filled = prompt_yes_no("Should the shape be filled? (y/n): ");
+    } else {
+        shape->filled = false;
+    }
+    switch (shape->kind) {
+        case SHAPE_CIRCLE:
+            choose_canvas_coordinate("circle center", &shape->p1);
+            prompt_integer_range("Enter radius (0..20): ", &shape->radius, 0, 20);
+            break;
+        case SHAPE_RECTANGLE:
+            choose_canvas_coordinate("rectangle corner 1", &shape->p1);
+            choose_canvas_coordinate("rectangle corner 2", &shape->p2);
+            break;
+        case SHAPE_LINE:
+            choose_canvas_coordinate("line start", &shape->p1);
+            choose_canvas_coordinate("line end", &shape->p2);
+            break;
+        case SHAPE_TRIANGLE:
+            choose_canvas_coordinate("triangle vertex 1", &shape->p1);
+            choose_canvas_coordinate("triangle vertex 2", &shape->p2);
+            choose_canvas_coordinate("triangle vertex 3", &shape->p3);
+            break;
+        default:
+            break;
+    }
+}
+
+static void print_shape_summary(int index, const Shape *shape) {
+    if (shape == NULL) {
+        return;
+    }
+    printf("%2d: %s ", index, shape_kind_name(shape->kind));
+    switch (shape->kind) {
+        case SHAPE_CIRCLE:
+            printf("center=(%d,%d) radius=%d", shape->p1.x, shape->p1.y, shape->radius);
+            break;
+        case SHAPE_RECTANGLE:
+            printf("(%d,%d)-(%d,%d)", shape->p1.x, shape->p1.y, shape->p2.x, shape->p2.y);
+            break;
+        case SHAPE_LINE:
+            printf("(%d,%d)->(%d,%d)", shape->p1.x, shape->p1.y, shape->p2.x, shape->p2.y);
+            break;
+        case SHAPE_TRIANGLE:
+            printf("(%d,%d),(%d,%d),(%d,%d)", shape->p1.x, shape->p1.y, shape->p2.x, shape->p2.y, shape->p3.x, shape->p3.y);
+            break;
+        default:
+            break;
+    }
+    printf(" %s symbol='%c'\n", shape->filled ? "filled" : "outline", shape->glyph);
+}
+
+static void list_all_shapes(void) {
+    if (activeDrawing.count == 0) {
+        printf("There are no objects to list.\n");
+        return;
+    }
+    printf("\n=== Object List ===\n");
+    for (int index = 0; index < activeDrawing.count; ++index) {
+        print_shape_summary(index, &activeDrawing.items[index]);
+    }
+    printf("\n");
+}
+
+static void show_canvas_statistics(void) {
+    int counts[5] = {0};
+    for (int i = 0; i < activeDrawing.count; ++i) {
+        ShapeKind kind = activeDrawing.items[i].kind;
+        if (kind >= SHAPE_CIRCLE && kind <= SHAPE_TRIANGLE) {
+            counts[kind] += 1;
         }
     }
     printf("\n=== Canvas Statistics ===\n");
-    printf("Total objects: %d\n", object_count);
-    printf("Circles: %d\n", circles);
-    printf("Rectangles: %d\n", rectangles);
-    printf("Lines: %d\n", lines);
-    printf("Triangles: %d\n", triangles);
+    printf("Total objects: %d\n", activeDrawing.count);
+    printf("Circles: %d\n", counts[SHAPE_CIRCLE]);
+    printf("Rectangles: %d\n", counts[SHAPE_RECTANGLE]);
+    printf("Lines: %d\n", counts[SHAPE_LINE]);
+    printf("Triangles: %d\n", counts[SHAPE_TRIANGLE]);
+    printf("\n");
 }
 
-void search_objects() {
-    if (object_count == 0) {
-        printf("No objects to search.\n");
+static bool save_drawing_to_file(const char *filename) {
+    if (!is_safe_filename(filename)) {
+        return false;
+    }
+    FILE *out = fopen(filename, "w");
+    if (out == NULL) {
+        return false;
+    }
+    fprintf(out, "%s\n%d\n%d\n", SAVE_FILE_SIGNATURE, SAVE_FILE_VERSION, activeDrawing.count);
+    for (int i = 0; i < activeDrawing.count; ++i) {
+        const Shape *s = &activeDrawing.items[i];
+        fprintf(out,
+                "%d %d %d %d %d %d %d %d %c %d\n",
+                (int)s->kind,
+                s->p1.x, s->p1.y,
+                s->p2.x, s->p2.y,
+                s->p3.x, s->p3.y,
+                s->radius,
+                s->glyph,
+                s->filled ? 1 : 0);
+    }
+    fclose(out);
+    return true;
+}
+
+static bool parse_shape_line(const char *line, Shape *shape) {
+    if (line == NULL || shape == NULL) {
+        return false;
+    }
+    int kind = 0;
+    int filled = 0;
+    char glyph = 0;
+    int values[8] = {0};
+    if (sscanf(line,
+               "%d %d %d %d %d %d %d %d %c %d",
+               &kind,
+               &values[0], &values[1],
+               &values[2], &values[3],
+               &values[4], &values[5],
+               &values[6],
+               &glyph,
+               &filled) != 10) {
+        return false;
+    }
+    if (kind < SHAPE_CIRCLE || kind > SHAPE_TRIANGLE) {
+        return false;
+    }
+    shape->kind = (ShapeKind)kind;
+    shape->p1.x = values[0];
+    shape->p1.y = values[1];
+    shape->p2.x = values[2];
+    shape->p2.y = values[3];
+    shape->p3.x = values[4];
+    shape->p3.y = values[5];
+    shape->radius = values[6];
+    shape->glyph = glyph;
+    shape->filled = filled != 0;
+    return true;
+}
+
+static bool load_drawing_from_file(const char *filename) {
+    if (!is_safe_filename(filename)) {
+        return false;
+    }
+    FILE *in = fopen(filename, "r");
+    if (in == NULL) {
+        return false;
+    }
+    char header[INPUT_BUFFER];
+    if (!fgets(header, sizeof(header), in)) {
+        fclose(in);
+        return false;
+    }
+    trim_newline(header);
+    if (strcmp(header, SAVE_FILE_SIGNATURE) != 0) {
+        fclose(in);
+        return false;
+    }
+    int version = 0;
+    if (fscanf(in, "%d\n", &version) != 1 || version != SAVE_FILE_VERSION) {
+        fclose(in);
+        return false;
+    }
+    int count = 0;
+    if (fscanf(in, "%d\n", &count) != 1 || count < 0 || count > MAX_OBJECTS) {
+        fclose(in);
+        return false;
+    }
+    Drawing imported = { .count = 0 };
+    char line[INPUT_BUFFER];
+    for (int i = 0; i < count; ++i) {
+        if (!fgets(line, sizeof(line), in)) {
+            fclose(in);
+            return false;
+        }
+        trim_newline(line);
+        if (!parse_shape_line(line, &imported.items[imported.count])) {
+            fclose(in);
+            return false;
+        }
+        imported.count += 1;
+    }
+    fclose(in);
+    activeDrawing = imported;
+    return true;
+}
+
+static bool export_canvas_ascii(const char *filename) {
+    if (!is_safe_filename(filename)) {
+        return false;
+    }
+    FILE *out = fopen(filename, "w");
+    if (out == NULL) {
+        return false;
+    }
+    for (int row = 0; row < CANVAS_HEIGHT; ++row) {
+        for (int col = 0; col < CANVAS_WIDTH; ++col) {
+            fputc(activeCanvas.cells[row][col], out);
+        }
+        fputc('\n', out);
+    }
+    fclose(out);
+    return true;
+}
+
+static void history_initialize(void) {
+    drawingHistory.current_index = 0;
+    drawingHistory.max_index = 0;
+    drawingHistory.entries[0].snapshot = activeDrawing;
+}
+
+static void history_push(void) {
+    if (drawingHistory.current_index < drawingHistory.max_index) {
+        drawingHistory.max_index = drawingHistory.current_index;
+    }
+    if (drawingHistory.max_index < MAX_HISTORY) {
+        drawingHistory.max_index += 1;
+        drawingHistory.current_index += 1;
+        drawingHistory.entries[drawingHistory.current_index].snapshot = activeDrawing;
         return;
     }
-    printf("\n=== Search Objects ===\n");
+    for (int i = 0; i < MAX_HISTORY; ++i) {
+        drawingHistory.entries[i] = drawingHistory.entries[i + 1];
+    }
+    drawingHistory.entries[MAX_HISTORY].snapshot = activeDrawing;
+    drawingHistory.current_index = MAX_HISTORY;
+    drawingHistory.max_index = MAX_HISTORY;
+}
+
+static bool history_can_undo(void) {
+    return drawingHistory.current_index > 0;
+}
+
+static bool history_can_redo(void) {
+    return drawingHistory.current_index < drawingHistory.max_index;
+}
+
+static void history_undo(void) {
+    if (!history_can_undo()) {
+        printf("Nothing left to undo.\n");
+        return;
+    }
+    drawingHistory.current_index -= 1;
+    activeDrawing = drawingHistory.entries[drawingHistory.current_index].snapshot;
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    printf("Undo applied.\n");
+}
+
+static void history_redo(void) {
+    if (!history_can_redo()) {
+        printf("Nothing left to redo.\n");
+        return;
+    }
+    drawingHistory.current_index += 1;
+    activeDrawing = drawingHistory.entries[drawingHistory.current_index].snapshot;
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    printf("Redo applied.\n");
+}
+
+static void search_by_type(void) {
+    printf("Search shapes by type:\n");
+    printf("1. Circle\n2. Rectangle\n3. Line\n4. Triangle\n");
+    int selection = 0;
+    if (!prompt_integer_range("Select type (1-4): ", &selection, 1, 4)) {
+        printf("Invalid selection.\n");
+        return;
+    }
+    ShapeKind target = (ShapeKind)selection;
+    int found = 0;
+    for (int i = 0; i < activeDrawing.count; ++i) {
+        if (activeDrawing.items[i].kind == target) {
+            print_shape_summary(i, &activeDrawing.items[i]);
+            found += 1;
+        }
+    }
+    if (found == 0) {
+        printf("No shapes of that type were found.\n");
+    }
+}
+
+static void search_by_symbol(void) {
+    char symbol = '\0';
+    if (!prompt_char("Enter symbol to search: ", &symbol)) {
+        printf("Invalid symbol.\n");
+        return;
+    }
+    int found = 0;
+    for (int i = 0; i < activeDrawing.count; ++i) {
+        if (activeDrawing.items[i].glyph == symbol) {
+            print_shape_summary(i, &activeDrawing.items[i]);
+            found += 1;
+        }
+    }
+    if (found == 0) {
+        printf("No shapes with that symbol were found.\n");
+    }
+}
+
+static void search_by_coordinate(void) {
+    Point location;
+    if (!prompt_integer_range("Enter search X (0..39): ", &location.x, 0, CANVAS_WIDTH - 1) ||
+        !prompt_integer_range("Enter search Y (0..19): ", &location.y, 0, CANVAS_HEIGHT - 1)) {
+        printf("Invalid coordinate.\n");
+        return;
+    }
+    int found = 0;
+    for (int i = 0; i < activeDrawing.count; ++i) {
+        if (shape_contains_point(&activeDrawing.items[i], location)) {
+            print_shape_summary(i, &activeDrawing.items[i]);
+            found += 1;
+        }
+    }
+    if (found == 0) {
+        printf("No shapes intersect that point.\n");
+    }
+}
+
+static void perform_object_search(void) {
+    if (activeDrawing.count == 0) {
+        printf("No objects available to search.\n");
+        return;
+    }
+    printf("\nSearch options:\n");
     printf("1. By type\n");
     printf("2. By symbol\n");
     printf("3. By coordinate\n");
-    printf("Select (1-3): ");
-    int choice;
-    if (!read_int(NULL, &choice)) { printf("Invalid input.\n"); return; }
-    int found = 0;
-    if (choice == 1) {
-        printf("Types: 1.Circle 2.Rectangle 3.Line 4.Triangle\n");
-        if (!read_int("Select type: ", &choice)) { printf("Invalid input.\n"); return; }
-        if (choice < 1 || choice > 4) { printf("Invalid type.\n"); return; }
-        ShapeType type = (ShapeType)(choice - 1);
-        for (int i = 0; i < object_count; i++) {
-            if (objects[i].type == type) {
-                printf("Found object %d.\n", i);
-                found++;
-            }
-        }
-    } else if (choice == 2) {
-        char symbol;
-        if (!read_char("Enter symbol to search: ", &symbol)) { printf("Invalid input.\n"); return; }
-        for (int i = 0; i < object_count; i++) {
-            if (objects[i].symbol == symbol) {
-                printf("Found object %d.\n", i);
-                found++;
-            }
-        }
-    } else if (choice == 3) {
-        int x, y;
-        if (!read_int("Enter X coordinate: ", &x) || !read_int("Enter Y coordinate: ", &y)) { printf("Invalid input.\n"); return; }
-        for (int i = 0; i < object_count; i++) {
-            if (shape_contains_coordinate(&objects[i], x, y)) {
-                printf("Found object %d.\n", i);
-                found++;
-            }
-        }
-    } else {
-        printf("Invalid choice.\n");
+    int option = 0;
+    if (!prompt_integer_range("Choose search mode (1-3): ", &option, 1, 3)) {
+        printf("Search selection invalid.\n");
         return;
     }
-    if (!found) {
-        printf("No matching objects found.\n");
+    switch (option) {
+        case 1: search_by_type(); break;
+        case 2: search_by_symbol(); break;
+        case 3: search_by_coordinate(); break;
+        default: printf("Unknown search option.\n"); break;
     }
 }
 
-void show_shape_measurements() {
-    if (object_count == 0) {
-        printf("No objects available.\n");
+static void action_add_object(void) {
+    printf("\n=== Add New Object ===\n");
+    printf("1. Circle\n2. Rectangle\n3. Line\n4. Triangle\n");
+    int typeSelection = 0;
+    if (!prompt_integer_range("Select shape type (1-4): ", &typeSelection, 1, 4)) {
+        printf("Invalid type.\n");
         return;
     }
-    list_objects();
-    int index;
-    if (!read_int("Enter object index to analyze: ", &index)) { printf("Invalid input.\n"); return; }
-    if (index < 0 || index >= object_count) { printf("Invalid index.\n"); return; }
-    double area = shape_area(&objects[index]);
-    double perimeter = shape_perimeter(&objects[index]);
-    printf("Object %d area: %.2f\n", index, area);
-    printf("Object %d perimeter: %.2f\n", index, perimeter);
-}
-
-int validate_filename(const char *name) {
-    if (name == NULL || name[0] == '\0') return 0;
-    if (strchr(name, '/') || strchr(name, '\\') || strchr(name, ':')) return 0;
-    return 1;
-}
-
-void menu_add_object() {
-    printf("\n=== Add Object ===\n");
-    printf("1. Circle\n");
-    printf("2. Rectangle\n");
-    printf("3. Line\n");
-    printf("4. Triangle\n");
-    printf("Select (1-4): ");
-    int choice;
-    if (!read_int(NULL, &choice)) { printf("Invalid input.\n"); return; }
-    char symbol;
-    if (!read_char("Enter symbol (e.g., *, _, #): ", &symbol)) { printf("Invalid input.\n"); return; }
-    int x1, y1, x2, y2, x3, y3, radius;
-    int filled = 0;
-    if (choice == 1 || choice == 2 || choice == 4) {
-        char ans = 'n';
-        if (read_char("Fill shape interior? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-            filled = 1;
-        }
+    Shape candidate;
+    if (!create_shape_for_kind((ShapeKind)typeSelection, &candidate)) {
+        printf("Could not create shape.\n");
+        return;
     }
-    switch (choice) {
-        case 1: {
-            char ans = 'n';
-            if (read_char("Select center from canvas row? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-                if (!select_canvas_position("circle center", &x1, &y1)) return;
-            } else {
-                if (!read_int("Enter center X: ", &x1) || !read_int("Enter center Y: ", &y1)) { printf("Invalid input.\n"); return; }
-            }
-            if (!read_int("Enter radius: ", &radius) || radius < 0) { printf("Invalid input.\n"); return; }
-            push_undo_state();
-            add_object(CIRCLE, x1, y1, 0, 0, 0, 0, radius, symbol, filled);
-            rebuild_canvas();
-            clear_redo();
-            break;
-        }
-        case 2: {
-            char ans = 'n';
-            if (read_char("Select top-left from canvas row? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-                if (!select_canvas_position("rectangle top-left", &x1, &y1)) return;
-            } else {
-                if (!read_int("Enter top-left X: ", &x1) || !read_int("Enter top-left Y: ", &y1)) { printf("Invalid input.\n"); return; }
-            }
-            if (!read_int("Enter bottom-right X: ", &x2) || !read_int("Enter bottom-right Y: ", &y2)) { printf("Invalid input.\n"); return; }
-            push_undo_state();
-            add_object(RECTANGLE, x1, y1, x2, y2, 0, 0, 0, symbol, filled);
-            rebuild_canvas();
-            clear_redo();
-            break;
-        }
-        case 3: {
-            char ans = 'n';
-            if (read_char("Select start from canvas row? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-                if (!select_canvas_position("line start", &x1, &y1)) return;
-            } else {
-                if (!read_int("Enter start X: ", &x1) || !read_int("Enter start Y: ", &y1)) { printf("Invalid input.\n"); return; }
-            }
-            if (!read_int("Enter end X: ", &x2) || !read_int("Enter end Y: ", &y2)) { printf("Invalid input.\n"); return; }
-            push_undo_state();
-            add_object(LINE, x1, y1, x2, y2, 0, 0, 0, symbol, 0);
-            rebuild_canvas();
-            clear_redo();
-            break;
-        }
-        case 4: {
-            char ans = 'n';
-            if (read_char("Select first vertex from canvas row? (y/n): ", &ans) && (ans == 'y' || ans == 'Y')) {
-                if (!select_canvas_position("triangle vertex 1", &x1, &y1)) return;
-            } else {
-                if (!read_int("Enter x1: ", &x1) || !read_int("Enter y1: ", &y1)) { printf("Invalid input.\n"); return; }
-            }
-            if (!read_int("Enter x2: ", &x2) || !read_int("Enter y2: ", &y2) || !read_int("Enter x3: ", &x3) || !read_int("Enter y3: ", &y3)) { printf("Invalid input.\n"); return; }
-            push_undo_state();
-            add_object(TRIANGLE, x1, y1, x2, y2, x3, y3, 0, symbol, filled);
-            rebuild_canvas();
-            clear_redo();
-            break;
-        }
-        default:
-            printf("Invalid choice!\n");
+    if (!add_shape_to_drawing(&candidate)) {
+        printf("Object list is full.\n");
+        return;
     }
+    history_push();
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
 }
 
-void main_menu() {
-    int choice;
-    while (1) {
-        printf("\n===== 2D Graphics Editor =====\n");
-        printf("1. Add Object\n");
-        printf("2. Delete Object\n");
-        printf("3. View Picture\n");
-        printf("4. List Objects\n");
-        printf("5. Clear All\n");
-        printf("6. Pick/Set Point\n");
-        printf("7. Modify Object\n");
-        printf("8. Move Object\n");
-        printf("9. Duplicate Object\n");
-        printf("10. Search Objects\n");
-        printf("11. Canvas Statistics\n");
-        printf("12. Save Drawing\n");
-        printf("13. Load Drawing\n");
-        printf("14. Export ASCII Art\n");
-        printf("15. Undo\n");
-        printf("16. Redo\n");
-        printf("17. Calculate Area/Perimeter\n");
-        printf("18. Exit\n");
-        printf("Select (1-18): ");
-        if (!read_int(NULL, &choice)) { printf("Invalid input.\n"); continue; }
+static void action_delete_object(void) {
+    if (activeDrawing.count == 0) {
+        printf("No objects to delete.\n");
+        return;
+    }
+    list_all_shapes();
+    int index = 0;
+    if (!prompt_integer_range("Enter index of object to delete: ", &index, 0, activeDrawing.count - 1)) {
+        printf("Invalid index.\n");
+        return;
+    }
+    if (!delete_shape_from_drawing(index)) {
+        printf("Could not delete object.\n");
+        return;
+    }
+    history_push();
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
+}
+
+static void action_view_canvas(void) {
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
+}
+
+static void action_list_objects(void) {
+    list_all_shapes();
+}
+
+static void action_clear_all(void) {
+    if (activeDrawing.count == 0) {
+        printf("Canvas is already empty.\n");
+        return;
+    }
+    clear_drawing();
+    history_push();
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    printf("All objects removed.\n");
+}
+
+static void action_pick_set_point(void) {
+    Point location;
+    if (!prompt_integer_range("Enter point X (0..39): ", &location.x, 0, CANVAS_WIDTH - 1) ||
+        !prompt_integer_range("Enter point Y (0..19): ", &location.y, 0, CANVAS_HEIGHT - 1)) {
+        printf("Invalid coordinates.\n");
+        return;
+    }
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
+    printf("Current character at (%d,%d): %c\n", location.x, location.y, activeCanvas.cells[location.y][location.x]);
+    if (!prompt_yes_no("Do you want to set a new character there? (y/n): ")) {
+        return;
+    }
+    char symbol = '\0';
+    if (!prompt_char("Enter replacement character: ", &symbol)) {
+        printf("Invalid symbol.\n");
+        return;
+    }
+    Shape pointShape = {
+        .kind = SHAPE_LINE,
+        .p1 = location,
+        .p2 = location,
+        .p3 = {0, 0},
+        .radius = 0,
+        .glyph = symbol,
+        .filled = false
+    };
+    if (!add_shape_to_drawing(&pointShape)) {
+        printf("Cannot add point object because storage is full.\n");
+        return;
+    }
+    history_push();
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
+}
+
+static void action_modify_object(void) {
+    if (activeDrawing.count == 0) {
+        printf("No objects available to modify.\n");
+        return;
+    }
+    list_all_shapes();
+    int index = 0;
+    if (!prompt_integer_range("Enter object index to modify: ", &index, 0, activeDrawing.count - 1)) {
+        printf("Invalid index.\n");
+        return;
+    }
+    history_push();
+    replace_shape_fields(&activeDrawing.items[index]);
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
+}
+
+static void action_move_object(void) {
+    if (activeDrawing.count == 0) {
+        printf("No objects available to move.\n");
+        return;
+    }
+    list_all_shapes();
+    int index = 0;
+    if (!prompt_integer_range("Enter object index to move: ", &index, 0, activeDrawing.count - 1)) {
+        printf("Invalid index.\n");
+        return;
+    }
+    int dx = 0, dy = 0;
+    if (!prompt_integer_range("Enter horizontal shift (-40..40): ", &dx, -40, 40) ||
+        !prompt_integer_range("Enter vertical shift (-20..20): ", &dy, -20, 20)) {
+        printf("Invalid movement values.\n");
+        return;
+    }
+    history_push();
+    if (!move_shape_in_drawing(index, dx, dy)) {
+        printf("Move failed.\n");
+        return;
+    }
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
+}
+
+static void action_duplicate_object(void) {
+    if (activeDrawing.count == 0) {
+        printf("No objects to duplicate.\n");
+        return;
+    }
+    list_all_shapes();
+    int index = 0;
+    if (!prompt_integer_range("Enter object index to duplicate: ", &index, 0, activeDrawing.count - 1)) {
+        printf("Invalid index.\n");
+        return;
+    }
+    if (!duplicate_shape_in_drawing(index)) {
+        printf("Duplicate failed.\n");
+        return;
+    }
+    history_push();
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
+}
+
+static void action_search_objects(void) {
+    perform_object_search();
+}
+
+static void action_canvas_statistics(void) {
+    show_canvas_statistics();
+}
+
+static void action_save_drawing(void) {
+    char filename[INPUT_BUFFER];
+    if (!prompt_string("Enter save filename: ", filename, sizeof(filename))) {
+        printf("Failed to read filename.\n");
+        return;
+    }
+    if (!save_drawing_to_file(filename)) {
+        printf("Save failed. Check file name and permissions.\n");
+        return;
+    }
+    printf("Drawing saved to %s\n", filename);
+}
+
+static void action_load_drawing(void) {
+    char filename[INPUT_BUFFER];
+    if (!prompt_string("Enter load filename: ", filename, sizeof(filename))) {
+        printf("Failed to read filename.\n");
+        return;
+    }
+    if (!load_drawing_from_file(filename)) {
+        printf("Load failed. File may be invalid.\n");
+        return;
+    }
+    history_push();
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    display_canvas(&activeCanvas);
+    printf("Drawing loaded from %s\n", filename);
+}
+
+static void action_export_ascii(void) {
+    char filename[INPUT_BUFFER];
+    if (!prompt_string("Enter ASCII export filename: ", filename, sizeof(filename))) {
+        printf("Failed to read filename.\n");
+        return;
+    }
+    refresh_canvas(&activeCanvas, &activeDrawing);
+    if (!export_canvas_ascii(filename)) {
+        printf("Export failed.\n");
+        return;
+    }
+    printf("ASCII art exported to %s\n", filename);
+}
+
+static void action_undo(void) {
+    history_undo();
+    display_canvas(&activeCanvas);
+}
+
+static void action_redo(void) {
+    history_redo();
+    display_canvas(&activeCanvas);
+}
+
+static void action_measure_shape(void) {
+    if (activeDrawing.count == 0) {
+        printf("No objects available for measurement.\n");
+        return;
+    }
+    list_all_shapes();
+    int index = 0;
+    if (!prompt_integer_range("Enter object index for measurement: ", &index, 0, activeDrawing.count - 1)) {
+        printf("Invalid index.\n");
+        return;
+    }
+    const Shape *shape = &activeDrawing.items[index];
+    double area = shape_area(shape);
+    double perimeter = shape_perimeter(shape);
+    printf("Object %d area = %.2f, perimeter = %.2f\n", index, area, perimeter);
+}
+
+static void print_menu(void) {
+    printf("\n=== 2D Graphics Editor ===\n");
+    printf("1  Add Object\n");
+    printf("2  Delete Object\n");
+    printf("3  View Canvas\n");
+    printf("4  List Objects\n");
+    printf("5  Clear All Objects\n");
+    printf("6  Pick/Set Point\n");
+    printf("7  Modify Object\n");
+    printf("8  Move Object\n");
+    printf("9  Duplicate Object\n");
+    printf("10 Search Objects\n");
+    printf("11 Canvas Statistics\n");
+    printf("12 Save Drawing\n");
+    printf("13 Load Drawing\n");
+    printf("14 Export ASCII Art\n");
+    printf("15 Undo\n");
+    printf("16 Redo\n");
+    printf("17 Area / Perimeter\n");
+    printf("18 Exit\n");
+}
+
+static void run_editor(void) {
+    bool exitRequested = false;
+    while (!exitRequested) {
+        print_menu();
+        int choice = 0;
+        if (!prompt_integer_range("Choose an option (1-18): ", &choice, 1, 18)) {
+            printf("Please enter a valid option.\n");
+            continue;
+        }
         switch (choice) {
-            case 1:
-                menu_add_object();
-                display_canvas();
-                break;
-            case 2: {
-                list_objects();
-                if (object_count > 0) {
-                    int index;
-                    if (!read_int("Enter object index to delete: ", &index)) { printf("Invalid input.\n"); break; }
-                    if (index < 0 || index >= object_count) { printf("Invalid index.\n"); break; }
-                    push_undo_state();
-                    delete_object(index);
-                    rebuild_canvas();
-                    clear_redo();
-                    display_canvas();
-                }
-                break;
-            }
-            case 3:
-                rebuild_canvas();
-                display_canvas();
-                break;
-            case 4:
-                list_objects();
-                break;
-            case 5:
-                if (object_count > 0) {
-                    push_undo_state();
-                    object_count = 0;
-                    init_canvas();
-                    clear_redo();
-                }
-                printf("All objects cleared!\n");
-                break;
-            case 6:
-                pick_point();
-                display_canvas();
-                break;
-            case 7: {
-                list_objects();
-                if (object_count > 0) {
-                    int index;
-                    if (!read_int("Enter object index to modify: ", &index)) { printf("Invalid input.\n"); break; }
-                    if (index < 0 || index >= object_count) { printf("Invalid index.\n"); break; }
-                    push_undo_state();
-                    modify_object(index);
-                    rebuild_canvas();
-                    clear_redo();
-                    display_canvas();
-                }
-                break;
-            }
-            case 8: {
-                list_objects();
-                if (object_count > 0) {
-                    int index, dx, dy;
-                    if (!read_int("Enter object index to move: ", &index) || !read_int("Enter X offset: ", &dx) || !read_int("Enter Y offset: ", &dy)) { printf("Invalid input.\n"); break; }
-                    if (index < 0 || index >= object_count) { printf("Invalid index.\n"); break; }
-                    push_undo_state();
-                    move_object(index, dx, dy);
-                    rebuild_canvas();
-                    clear_redo();
-                    display_canvas();
-                }
-                break;
-            }
-            case 9: {
-                list_objects();
-                if (object_count > 0) {
-                    int index;
-                    if (!read_int("Enter object index to duplicate: ", &index)) { printf("Invalid input.\n"); break; }
-                    if (index < 0 || index >= object_count) { printf("Invalid index.\n"); break; }
-                    push_undo_state();
-                    duplicate_object(index);
-                    rebuild_canvas();
-                    clear_redo();
-                    display_canvas();
-                }
-                break;
-            }
-            case 10:
-                search_objects();
-                break;
-            case 11:
-                display_canvas_statistics();
-                break;
-            case 12: {
-                char filename[128];
-                printf("Enter file name to save: ");
-                if (!read_line(filename, sizeof(filename)) || !validate_filename(filename)) { printf("Invalid file name.\n"); break; }
-                save_drawing(filename);
-                break;
-            }
-            case 13: {
-                char filename[128];
-                printf("Enter file name to load: ");
-                if (!read_line(filename, sizeof(filename)) || !validate_filename(filename)) { printf("Invalid file name.\n"); break; }
-                load_drawing(filename);
-                break;
-            }
-            case 14: {
-                char filename[128];
-                printf("Enter file name to export ASCII art: ");
-                if (!read_line(filename, sizeof(filename)) || !validate_filename(filename)) { printf("Invalid file name.\n"); break; }
-                export_ascii_art(filename);
-                break;
-            }
-            case 15:
-                undo();
-                display_canvas();
-                break;
-            case 16:
-                redo();
-                display_canvas();
-                break;
-            case 17:
-                show_shape_measurements();
-                break;
+            case 1: action_add_object(); break;
+            case 2: action_delete_object(); break;
+            case 3: action_view_canvas(); break;
+            case 4: action_list_objects(); break;
+            case 5: action_clear_all(); break;
+            case 6: action_pick_set_point(); break;
+            case 7: action_modify_object(); break;
+            case 8: action_move_object(); break;
+            case 9: action_duplicate_object(); break;
+            case 10: action_search_objects(); break;
+            case 11: action_canvas_statistics(); break;
+            case 12: action_save_drawing(); break;
+            case 13: action_load_drawing(); break;
+            case 14: action_export_ascii(); break;
+            case 15: action_undo(); break;
+            case 16: action_redo(); break;
+            case 17: action_measure_shape(); break;
             case 18:
-                printf("Thank you for using 2D Graphics Editor!\n");
-                return;
+                exitRequested = true;
+                printf("Exiting editor.\n");
+                break;
             default:
-                printf("Invalid choice!\n");
+                printf("Unknown action.\n");
+                break;
         }
     }
 }
 
-int main() {
-    init_canvas();
-    main_menu();
+int main(void) {
+    canvas_clear(&activeCanvas);
+    activeDrawing.count = 0;
+    history_initialize();
+    run_editor();
     return 0;
 }
 
