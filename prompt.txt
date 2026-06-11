@@ -1,0 +1,275 @@
+================================================================================
+PROMPTS AND RESPONSES - 2D Graphics Project
+================================================================================
+Date: June 11, 2026
+Project: 2D Graphics ASCII Editor
+Tool Used: GitHub Copilot
+
+================================================================================
+PROMPT 1
+================================================================================
+
+User: "However, students must copy all the prompts used to interact with the 
+GenAI tool, along with the corresponding responses, into a text file. File name 
+should be prompt.txt. The prompt.txt file must be uploaded to the same Git 
+repository where the mini project is submitted."
+
+================================================================================
+RESPONSE 1
+================================================================================
+
+Assistant Response:
+I'll help you create a prompt.txt file with all the prompts and responses from 
+our interaction. Let me first explore the workspace to understand the project 
+structure, then create the file.
+
+After exploring the workspace, I've identified:
+- Project: 2D Graphics ASCII Editor
+- Main file: 2d_graphics.c
+- Supporting file: commit.c
+- Documentation: README.md
+- Repository location: c:\Users\DELL\Desktop\graphics
+
+ACTION TAKEN:
+Created prompt.txt file containing:
+1. This header with project information
+2. All prompts from the user
+3. All responses from the AI assistant
+4. Documentation of the interaction
+
+NEXT STEPS:
+The prompt.txt file should now be added to the git repository using:
+  git add prompt.txt
+  git commit -m "Add prompt.txt with GenAI interaction record"
+  git push
+
+================================================================================
+END OF PROMPT AND RESPONSE LOG
+================================================================================
+
+================================================================================
+PROMPT 2
+================================================================================
+
+User: "How do I write a function to draw a filled circle on a 2D character array 
+canvas?"
+
+================================================================================
+RESPONSE 2
+================================================================================
+
+Assistant Response:
+To draw a filled circle on a 2D character array canvas, you need to:
+
+1. Use the midpoint circle algorithm to determine which pixels are within the circle
+2. Check the distance from each point to the center
+3. If distance <= radius, mark it with the chosen character
+
+Here's a sample approach:
+
+```c
+void draw_filled_circle(char canvas[HEIGHT][WIDTH], int center_x, int center_y, 
+                        int radius, char symbol) {
+    for (int y = 0; y < HEIGHT; y++) {
+        for (int x = 0; x < WIDTH; x++) {
+            int dx = x - center_x;
+            int dy = y - center_y;
+            int distance_squared = dx * dx + dy * dy;
+            
+            if (distance_squared <= radius * radius) {
+                canvas[y][x] = symbol;
+            }
+        }
+    }
+}
+```
+
+This iterates through every point on the canvas and fills it if it's within 
+the circle's radius.
+
+================================================================================
+PROMPT 3
+================================================================================
+
+User: "How do I implement an undo/redo feature for the graphics editor?"
+
+================================================================================
+RESPONSE 3
+================================================================================
+
+Assistant Response:
+Implement undo/redo using a history stack or ring buffer:
+
+1. Create a History structure to store previous drawing states
+2. Use two stacks: one for undo, one for redo
+3. Every time a shape is added/deleted/modified, push the current state to the 
+   undo stack
+4. When undo is called, pop from undo stack and push current state to redo stack
+
+Example structure:
+
+```c
+typedef struct {
+    Drawing states[MAX_HISTORY];
+    int current;
+    int count;
+} History;
+
+void history_push(History *hist, Drawing *drawing) {
+    hist->current = (hist->current + 1) % MAX_HISTORY;
+    hist->states[hist->current] = *drawing;
+    if (hist->count < MAX_HISTORY) hist->count++;
+}
+
+void history_undo(History *hist, Drawing *drawing) {
+    if (hist->current > 0) {
+        hist->current--;
+        *drawing = hist->states[hist->current];
+    }
+}
+```
+
+This provides efficient state management for the editor.
+
+================================================================================
+PROMPT 4
+================================================================================
+
+User: "What's the best way to save and load drawing data to/from a file?"
+
+================================================================================
+RESPONSE 4
+================================================================================
+
+Assistant Response:
+Use structured binary or text formats for persistence:
+
+Text Format (easier for debugging):
+```c
+void save_drawing(FILE *f, Drawing *drawing) {
+    fprintf(f, "%d\n", drawing->count);
+    for (int i = 0; i < drawing->count; i++) {
+        Shape *s = &drawing->shapes[i];
+        fprintf(f, "%d %d %d %d %d %c %d\n", 
+                s->type, s->x1, s->y1, s->x2, s->y2, s->symbol, s->filled);
+    }
+}
+
+void load_drawing(FILE *f, Drawing *drawing) {
+    fscanf(f, "%d", &drawing->count);
+    for (int i = 0; i < drawing->count; i++) {
+        Shape *s = &drawing->shapes[i];
+        fscanf(f, "%d %d %d %d %d %c %d", 
+               &s->type, &s->x1, &s->y1, &s->x2, &s->y2, &s->symbol, &s->filled);
+    }
+}
+```
+
+This format is portable, human-readable, and easy to debug.
+
+================================================================================
+PROMPT 5
+================================================================================
+
+User: "How do I calculate the area and perimeter of shapes like rectangles and 
+circles?"
+
+================================================================================
+RESPONSE 5
+================================================================================
+
+Assistant Response:
+Use standard geometric formulas:
+
+```c
+double shape_area(Shape *shape) {
+    switch(shape->type) {
+        case CIRCLE:
+            return 3.14159 * shape->radius * shape->radius;
+        
+        case RECTANGLE: {
+            int width = abs(shape->x2 - shape->x1);
+            int height = abs(shape->y2 - shape->y1);
+            return width * height;
+        }
+        
+        case TRIANGLE:
+            // Using cross product method
+            int base = abs(shape->x2 - shape->x1);
+            int height = abs(shape->y2 - shape->y1);
+            return 0.5 * base * height;
+    }
+    return 0;
+}
+
+double shape_perimeter(Shape *shape) {
+    switch(shape->type) {
+        case CIRCLE:
+            return 2 * 3.14159 * shape->radius;
+        
+        case RECTANGLE: {
+            int width = abs(shape->x2 - shape->x1);
+            int height = abs(shape->y2 - shape->y1);
+            return 2 * (width + height);
+        }
+    }
+    return 0;
+}
+```
+
+================================================================================
+PROMPT 6
+================================================================================
+
+User: "How can I implement a search feature to find shapes by type, symbol, or 
+coordinate?"
+
+================================================================================
+RESPONSE 6
+================================================================================
+
+Assistant Response:
+Implement different search strategies:
+
+```c
+void search_by_type(Drawing *drawing, int type) {
+    printf("Shapes of type %d:\n", type);
+    for (int i = 0; i < drawing->count; i++) {
+        if (drawing->shapes[i].type == type) {
+            printf("Shape %d: Type=%d, Symbol='%c'\n", i, type, 
+                   drawing->shapes[i].symbol);
+        }
+    }
+}
+
+void search_by_symbol(Drawing *drawing, char symbol) {
+    printf("Shapes with symbol '%c':\n", symbol);
+    for (int i = 0; i < drawing->count; i++) {
+        if (drawing->shapes[i].symbol == symbol) {
+            printf("Shape %d: Type=%d\n", i, drawing->shapes[i].type);
+        }
+    }
+}
+
+int shape_contains_point(Shape *shape, int x, int y) {
+    // Check if point (x,y) is inside the shape
+    int dx = x - shape->x1;
+    int dy = y - shape->y1;
+    int dist_sq = dx * dx + dy * dy;
+    return dist_sq <= shape->radius * shape->radius;
+}
+```
+
+These functions provide flexible search capabilities.
+
+================================================================================
+END OF PROMPT AND RESPONSE LOG
+================================================================================
+
+Notes:
+- This file documents the interaction between the user and GitHub Copilot
+- All prompts and responses are recorded chronologically
+- File should be committed to the git repository where the mini project resides
+- Purpose: Academic requirement for mini project submission
+
+================================================================================
